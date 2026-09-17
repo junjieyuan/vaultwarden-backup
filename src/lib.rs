@@ -1,5 +1,6 @@
 //! Back up a vaultwarden `DATA_FOLDER` to a single timestamped `.tgz` and
-//! deliver one copy to every local target.
+//! deliver one copy to every local target, plus optionally one S3-compatible
+//! object-store target.
 //!
 //! The data directory's contents sit directly at the archive root (no
 //! top-level directory), so restoring is `tar -x -C <data dir>`; the
@@ -7,8 +8,8 @@
 //!
 //! Every intermediate artifact (database snapshot, `.tgz`, `.tgz.gpg`)
 //! lives in a scratch directory (`tempfile::tempdir()`, honoring `TMPDIR`)
-//! and is copied to the targets only once finished, so a run never touches
-//! a target until the final artifact is ready.
+//! and is copied/uploaded to the targets only once finished, so a run never
+//! touches a target until the final artifact is ready.
 
 // `unwrap`/`expect` are denied project-wide (Cargo.toml `[lints.clippy]`);
 // test builds are exempted here, production code is not.
@@ -19,6 +20,7 @@ pub mod crypto;
 pub mod db;
 pub mod deliver;
 pub mod files;
+pub mod s3;
 
 use std::collections::HashSet;
 use std::fs;
@@ -47,19 +49,72 @@ pub enum EncryptionType {
     Openpgp,
 }
 
+/// A single destination: a local directory or an S3-compatible object store.
+/// Local targets are delivered with the `.part` + rename choreography in
+/// `deliver`; the S3 target gets a multipart upload in `s3`. A run has any
+/// number of local targets and at most one S3 target.
+#[derive(Debug, Clone)]
+pub enum Target {
+    /// A local directory (created if missing).
+    Local { dir: PathBuf },
+    /// An S3-compatible object-store destination.
+    S3(S3Target),
+}
+
+/// Addressing style for the S3 endpoint (`--s3-addressing`). Two explicit
+/// values so the run never guesses: an IP/localhost or self-hosted endpoint
+/// (RustFS, MinIO, Cloudflare R2, …) needs `PathStyle`; AWS and most
+/// managed S3-compatible services resolve `<bucket>.<endpoint>` and can use
+/// `VirtualHosted`.
+#[derive(Debug, Clone, Copy, PartialEq, ValueEnum)]
+pub enum S3Addressing {
+    /// `https://<bucket>.<endpoint>/<key>`
+    VirtualHosted,
+    /// `https://<endpoint>/<bucket>/<key>`
+    PathStyle,
+}
+
+/// Fully explicit configuration of an S3 destination: no field has a silent
+/// default, so a run can never quietly upload to the wrong place (or to a
+/// storage that was not declared).
+#[derive(Debug, Clone)]
+pub struct S3Target {
+    /// S3-compatible endpoint URL (AWS `https://s3.<region>.amazonaws.com`,
+    /// RustFS, MinIO, Wasabi, Backblaze B2, Cloudflare R2, …).
+    pub endpoint: String,
+    /// Region used for SigV4 signing; passed through verbatim (R2 uses
+    /// `auto`), never validated.
+    pub region: String,
+    pub access_key: String,
+    pub secret_key: String,
+    pub bucket: String,
+    /// Object key prefix; `/` (or the empty string) means bucket root.
+    pub prefix: String,
+    pub addressing: S3Addressing,
+}
+
+/// Where a finished archive ended up, reported by `run` per target.
+#[derive(Debug, Clone)]
+pub enum Delivered {
+    /// Local path of the delivered archive.
+    Local(PathBuf),
+    /// Object key in the S3 bucket (`s3://<bucket>/<key>`).
+    S3 { bucket: String, key: String },
+}
+
 /// File name of the vaultwarden SQLite database inside the data directory.
 pub const DB_FILENAME: &str = "db.sqlite3";
 
-/// Run one backup into every local target; returns one path per target, in
-/// the same order as `local_targets`.
+/// Run one backup into every declared target; returns one `Delivered` per
+/// target — local paths first (in the order given), then the S3 object.
 pub fn run(
     local_source: PathBuf,
-    local_targets: Vec<PathBuf>,
+    targets: Vec<Target>,
     name: String,
     database_type: DatabaseType,
     encryption_type: EncryptionType,
     recipients: Vec<String>,
-) -> Result<Vec<PathBuf>> {
+) -> Result<Vec<Delivered>> {
     // The archive name becomes a file-name prefix; reject path separators
     // (and NUL, which every path API refuses) before anything else.
     check_archive_name(&name)?;
@@ -82,8 +137,8 @@ pub fn run(
             }
         }
     }
-    if local_targets.is_empty() {
-        bail!("at least one target is required (--local-target)");
+    if targets.is_empty() {
+        bail!("at least one target is required (--local-target and/or --s3-bucket)");
     }
     // Validate recipients before any other work, so a bad/unknown
     // recipient costs nothing (a typo must not cost a full archive run).
@@ -103,11 +158,27 @@ pub fn run(
         bail!("source '{}' is not a directory", source.display());
     }
 
+    // Split the declared targets into local directories and the single S3
+    // destination. The contract is "at most one S3 target per run"; a second
+    // one would otherwise be silently dropped by the Option, so refuse.
+    let mut local_dirs: Vec<PathBuf> = Vec::new();
+    let mut s3_target: Option<S3Target> = None;
+    for target in targets {
+        match target {
+            Target::Local { dir } => local_dirs.push(dir),
+            Target::S3(_) if s3_target.is_some() => {
+                bail!("at most one S3 target per run (--s3-* flags configure a single bucket)")
+            }
+            Target::S3(s3) => s3_target = Some(s3),
+        }
+    }
+
     // canonicalize resolves symlinks and `..`, so two spellings of one
     // physical directory collapse to a single entry and are delivered once.
+    // The S3 destination has no path, so it skips the nesting checks.
     let mut targets: Vec<PathBuf> = Vec::new();
     let mut seen: HashSet<PathBuf> = HashSet::new();
-    for t in &local_targets {
+    for t in &local_dirs {
         fs::create_dir_all(t)
             .with_context(|| format!("create target directory {}", t.display()))?;
         let t = t
@@ -146,11 +217,23 @@ pub fn run(
         EncryptionType::None => archive_name.clone(),
         EncryptionType::Openpgp => format!("{archive_name}.gpg"),
     };
-    deliver::ensure_targets_free(&targets, &final_name)?;
+    if !targets.is_empty() {
+        deliver::ensure_targets_free(&targets, &final_name)?;
+    }
+    // Build the S3 client early (fails fast on a malformed endpoint) and
+    // check the object is free before any backup work — the same
+    // refuse-before-work rule as the local targets.
+    let s3_client = match &s3_target {
+        Some(s3) => {
+            let client = s3::client(s3)?;
+            s3::ensure_object_free(&client, &s3::join_prefix(&s3.prefix, &final_name))?;
+            Some(client)
+        }
+        None => None,
+    };
 
-    // Everything between the snapshot and the delivered artifact lives in a
-    // scratch directory: no intermediate ever touches a target, and neither
-    // does the plaintext archive when encryption is on.
+    // Scratch holds every intermediate; targets only ever see the finished
+    // artifact, and with encryption the plaintext never leaves it.
     let work = tempfile::tempdir().context("create scratch working directory")?;
     let work_path = work.path();
     let snap = work_path.join(format!("{archive_name}.db-part"));
@@ -169,7 +252,42 @@ pub fn run(
         }
     };
 
-    deliver::deliver(&final_path, &targets)
+    // Deliver to every target, collecting failures so a partial delivery
+    // names all failing targets and the successes stay. Local targets keep
+    // the existing `deliver` wording.
+    let total = targets.len() + usize::from(s3_target.is_some());
+    let mut delivered: Vec<Delivered> = Vec::new();
+    let mut failures: Vec<String> = Vec::new();
+    if !targets.is_empty() {
+        match deliver::deliver(&final_path, &targets) {
+            Ok(paths) => delivered.extend(paths.into_iter().map(Delivered::Local)),
+            Err(err) => failures.push(err.to_string()),
+        }
+    }
+    if let (Some(s3), Some(client)) = (&s3_target, &s3_client) {
+        let key = s3::join_prefix(&s3.prefix, &final_name);
+        match s3::upload(client, &final_path, &key) {
+            Ok(()) => delivered.push(Delivered::S3 {
+                bucket: s3.bucket.clone(),
+                key,
+            }),
+            Err(err) => failures.push(format!("s3://{}/{key}: {err:#}", s3.bucket)),
+        }
+    }
+    if failures.is_empty() {
+        Ok(delivered)
+    } else if failures.len() == 1 {
+        // A single failure (typically the local-only case) keeps the
+        // original `deliver` wording verbatim.
+        bail!("{}", failures[0])
+    } else {
+        bail!(
+            "delivery failed for {} of {} target(s): {}",
+            failures.len(),
+            total,
+            failures.join("; ")
+        )
+    }
 }
 
 /// Format a UTC time stamp as `%Y-%m-%dT%H:%M:%SZ` (second precision).
@@ -255,6 +373,38 @@ mod tests {
     }
 
     #[test]
+    fn run_refuses_two_s3_targets() {
+        // The bail fires while splitting targets, before any S3 client or
+        // network work, so the S3Target values here are only placeholders.
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("data");
+        fs::create_dir_all(&src).unwrap();
+        let conn = rusqlite::Connection::open(src.join(DB_FILENAME)).unwrap();
+        conn.execute_batch("CREATE TABLE t(v TEXT)").unwrap();
+        drop(conn);
+
+        let s3 = S3Target {
+            endpoint: "http://127.0.0.1:1".into(),
+            region: "us-east-1".into(),
+            access_key: "ak".into(),
+            secret_key: "sk".into(),
+            bucket: "bkt".into(),
+            prefix: "/".into(),
+            addressing: S3Addressing::PathStyle,
+        };
+        let err = run(
+            src,
+            vec![Target::S3(s3.clone()), Target::S3(s3)],
+            "x".into(),
+            DatabaseType::Sqlite,
+            EncryptionType::None,
+            Vec::new(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("at most one S3 target"), "{err:?}");
+    }
+
+    #[test]
     fn run_aborts_when_artifact_name_already_exists() {
         use rusqlite::Connection;
 
@@ -284,7 +434,9 @@ mod tests {
 
             let delivered = run(
                 src.clone(),
-                vec![target.clone()],
+                vec![Target::Local {
+                    dir: target.clone(),
+                }],
                 "x".into(),
                 DatabaseType::Sqlite,
                 EncryptionType::None,

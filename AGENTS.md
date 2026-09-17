@@ -5,7 +5,8 @@
 `vaultwarden-backup` backs up a vaultwarden `DATA_FOLDER` into one
 timestamped `.tgz`: an SQLite online snapshot for `db.sqlite3` plus every
 other file streamed into a tar → gzip archive, delivered atomically to each
-local target, optionally OpenPGP-encrypted via the system `gpg`.
+local target and/or one S3-compatible object store (via the `object_store`
+crate), optionally OpenPGP-encrypted via the system `gpg`.
 
 ## Commands
 
@@ -37,6 +38,10 @@ local target, optionally OpenPGP-encrypted via the system `gpg`.
   (input is already gzip)
 - `src/deliver.rs` — atomic per-target copy; targets are independent but any
   failure fails the run, naming every failing target
+- `src/s3.rs` — S3-compatible delivery (`object_store` + a shared lazily
+  created tokio runtime behind a sync `block_on` wrapper): client build,
+  head-based no-overwrite preflight, streaming multipart upload,
+  `join_prefix` key composition
 
 ## Conventions & gotchas
 
@@ -45,7 +50,7 @@ local target, optionally OpenPGP-encrypted via the system `gpg`.
   so production code may not `unwrap`/`expect` (only `stamp()`'s static
   format string, with an explicit allow). Test builds opt out via
   `cfg_attr(test, ..)` in `src/lib.rs` and `#![allow]` in
-  `tests/integration.rs`.
+  `tests/`.
 - Archive layout is **flat**: the data directory's contents sit at the
   archive root with no top-level directory — restore is
   `tar -x -C <data dir>`. Don't add a wrapper directory.
@@ -59,7 +64,9 @@ local target, optionally OpenPGP-encrypted via the system `gpg`.
   the pid; scratch files live in a per-run `tempfile::tempdir()`).
 - Comments are "why", not "what" — do not restate code.
 - Tests: unit tests live in each `src/*.rs` module; end-to-end and
-  real-binary CLI tests in `tests/integration.rs`.
+  real-binary CLI tests in `tests/` — `core.rs` (library-level), `cli.rs`
+  (binary CLI + OpenPGP), `s3.rs` (offline cross-checks + gated e2e), with
+  shared fixtures in `tests/common/mod.rs`.
 - Commit messages follow **Conventional Commits**:
   `type(optional scope): imperative subject` — e.g. `feat:`, `fix:`,
   `docs:`, `ci:`; use a scope only when it adds context, e.g.

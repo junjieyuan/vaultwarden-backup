@@ -82,7 +82,9 @@ pub fn encrypt(plain: &Path, recipients: &[String]) -> Result<PathBuf> {
     Ok(final_path)
 }
 
-/// Accept only the 40-hex-digit primary-key fingerprint.
+/// Accept only the 40-hex-digit fingerprint (primary keys and subkeys
+/// alike — the check is format-only; which key `gpg --encrypt` uses is its
+/// own concern).
 fn validate_recipient(spec: &str) -> Result<()> {
     let hex_ok = spec.bytes().all(|b| b.is_ascii_hexdigit());
     if spec.len() != 40 || !hex_ok {

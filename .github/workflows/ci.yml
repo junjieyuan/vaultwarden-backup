@@ -11,6 +11,24 @@ permissions:
 jobs:
   lint-and-test:
     runs-on: ubuntu-latest
+    # RustFS (S3-compatible object store) backs the S3 end-to-end tests; the
+    # pinned tag must exist on Docker Hub — adjust if the tag moves. The
+    # access/secret keys here must match the Provision step and the test env.
+    services:
+      rustfs:
+        image: docker.io/rustfs/rustfs:1.0.0
+        env:
+          RUSTFS_VOLUMES: /data
+          RUSTFS_ADDRESS: 0.0.0.0:9000
+          RUSTFS_ACCESS_KEY: testak
+          RUSTFS_SECRET_KEY: testsk
+        ports:
+          - 9000:9000
+        # The image ships its own curl-based healthcheck in its compose
+        # examples; fall back to the TCP probe if the tag does not.
+        options: >-
+          --health-cmd "curl -f http://localhost:9000/health || exit 1"
+          --health-interval 5s --health-timeout 5s --health-retries 30
     steps:
       - uses: actions/checkout@v4
       # The runner's preinstalled rustup reads rust-toolchain.toml and
@@ -20,11 +38,31 @@ jobs:
       # GNUPGHOME, so gpg must be on PATH.
       - name: Install gpg
         run: sudo apt-get update && sudo apt-get install -y gnupg
+      # Create the S3 test bucket once RustFS is healthy (GitHub Actions
+      # waits for the service health check before running steps). object_store
+      # has no bucket-creation API, and MinIO's `mc` is discontinued (its
+      # dl.min.io CDN returns 410), so the bucket is provisioned with RustFS's
+      # own CLI `rc` (github.com/rustfs/cli) — same project as the server.
+      - name: Provision S3 test bucket
+        run: |
+          curl -sSL -o /tmp/rustfs-cli.tar.gz \
+            https://github.com/rustfs/cli/releases/download/v0.1.36/rustfs-cli-linux-amd64-v0.1.36.tar.gz
+          tar -xzf /tmp/rustfs-cli.tar.gz -C /usr/local/bin rc
+          chmod +x /usr/local/bin/rc
+          rc alias set rustfs http://127.0.0.1:9000 testak testsk
+          # --ignore-existing is idempotent: re-runs against a leftover
+          # bucket stay green.
+          rc bucket create rustfs/backup-test --ignore-existing
       - name: Check formatting
         run: cargo fmt --check
       - name: Lint
         run: cargo clippy --all-targets --all-features
       - name: Test
+        env:
+          VWB_S3_TEST_ENDPOINT: http://127.0.0.1:9000
+          VWB_S3_TEST_ACCESS_KEY: testak
+          VWB_S3_TEST_SECRET_KEY: testsk
+          VWB_S3_TEST_BUCKET: backup-test
         run: cargo test --all-targets --locked
       - name: Build release
         run: cargo build --release --locked

@@ -1,6 +1,6 @@
-//! Delivery of the finished artifact: copy to every local target
-//! atomically (`.part` -> fsync -> rename), refusing to overwrite an
-//! archive that already exists.
+//! Delivery of the finished artifact to local targets: copy to every local
+//! target atomically (`.part` -> fsync -> rename), refusing to overwrite an
+//! archive that already exists. S3-compatible delivery lives in `s3.rs`.
 
 use std::fs;
 use std::path::{Path, PathBuf};

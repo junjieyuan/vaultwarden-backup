@@ -10,10 +10,20 @@ license = "MIT"
 anyhow = "1"
 clap = { version = "4", features = ["derive", "env"] }
 flate2 = "1"
+object_store = { version = "0.14", default-features = false, features = ["aws"] }
 rusqlite = { version = "0.32", features = ["bundled", "backup"] }
 tar = "0.4"
 tempfile = "3"
 time = { version = "0.3", features = ["formatting", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "io-util", "fs"] }
+
+[dev-dependencies]
+# Integration tests are a separate crate: they link the library plus these,
+# so the S3 e2e helpers (object_store client, tokio runtime, time stamps)
+# must be declared here as well.
+object_store = { version = "0.14", default-features = false, features = ["aws"] }
+time = { version = "0.3", features = ["formatting", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread"] }
 
 [lints.rust]
 # Warnings are errors everywhere; set here (not a `-- -D warnings` flag) so
