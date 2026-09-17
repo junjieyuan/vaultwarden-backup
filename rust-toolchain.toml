@@ -1,0 +1,6 @@
+# `"1.98"` tracks the latest 1.98.x patch; bump it in lockstep with
+# Cargo.toml's `rust-version`. clippy/rustfmt are the pre-commit hook deps.
+[toolchain]
+channel = "1.98"
+profile = "minimal"
+components = ["clippy", "rustfmt"]
