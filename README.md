@@ -2,7 +2,9 @@
 
 Backs up a vaultwarden `DATA_FOLDER` into a single timestamped `.tgz`:
 `<name>-<UTC timestamp>.tgz`, e.g. `vaultwarden-backup-2026-07-22T11:04:59Z.tgz`,
-delivered to every local target you name.
+delivered to every local target you name, and optionally to one S3-compatible
+object-store target (AWS S3, Cloudflare R2, Wasabi, Backblaze B2, MinIO,
+RustFS, …).
 
 The archive is safe to upload and safe to restore:
 
@@ -33,7 +35,10 @@ The archive is safe to upload and safe to restore:
 ```
 vaultwarden-backup
   --source-type <TYPE> --local-source <DIR>
-  --target-type <TYPE> --local-target <DIR>
+  --target-type <TYPE> [--local-target <DIR>]...
+  [--s3-endpoint <URL> --s3-region <REGION> --s3-access-key <KEY>
+   --s3-secret-key <SECRET> --s3-bucket <BUCKET> --s3-prefix <PREFIX>
+   --s3-addressing <virtual-hosted|path-style>]
   --name <NAME> --database-type <TYPE> --encryption-type <TYPE>
   [--recipient <FPR>]...
 ```
@@ -45,8 +50,15 @@ its environment variable; the command line wins.
 | --- | --- | --- |
 | `--source-type` | `VWB_SOURCE_TYPE` | source type; only `local` |
 | `--local-source` | `VWB_LOCAL_SOURCE` | the vaultwarden data directory (contains `db.sqlite3`); a single directory — the source is always one |
-| `--target-type` | `VWB_TARGET_TYPE` | destination type(s); only `local` |
+| `--target-type` | `VWB_TARGET_TYPE` | destination type(s): `local` and/or `s3` |
 | `--local-target` | `VWB_LOCAL_TARGET` | local target directory (created if missing); repeat or comma-separate (`A,B`) to deliver one copy to several local directories; the same physical directory given twice is delivered once |
+| `--s3-endpoint` | `VWB_S3_ENDPOINT` | S3-compatible endpoint URL, **required** with `--target-type s3`: self-hosted (RustFS, MinIO), S3-compatible clouds (Wasabi, Backblaze B2, Cloudflare R2) or AWS itself (`https://s3.<region>.amazonaws.com`) |
+| `--s3-region` | `VWB_S3_REGION` | region used for signing, **required** with `--target-type s3`; passed through verbatim — Cloudflare R2 uses `auto` |
+| `--s3-access-key` | `VWB_S3_ACCESS_KEY` | S3 access key, **required** with `--target-type s3` |
+| `--s3-secret-key` | `VWB_S3_SECRET_KEY` | S3 secret key, **required** with `--target-type s3` |
+| `--s3-bucket` | `VWB_S3_BUCKET` | S3 bucket name, **required** with `--target-type s3`; the bucket must already exist |
+| `--s3-prefix` | `VWB_S3_PREFIX` | object key prefix, **required** with `--target-type s3`; `/` (or the empty string) means bucket root, `weekly`/`weekly/` are the same |
+| `--s3-addressing` | `VWB_S3_ADDRESSING` | addressing style, **required** with `--target-type s3`: `virtual-hosted` (`https://<bucket>.<endpoint>/<key>`) for AWS-style endpoints, `path-style` (`https://<endpoint>/<bucket>/<key>`) for IP/self-hosted/R2 endpoints |
 | `--name` | `VWB_NAME` | archive name prefix (final file is `<name>-<YYYY-MM-DDTHH:MM:SSZ>.tgz`); at most 200 bytes, must not contain `/` (any other character, including non-ASCII, is fine) |
 | `--database-type` | `VWB_DATABASE_TYPE` | database type; only `sqlite` is supported |
 | `--encryption-type` | `VWB_ENCRYPTION_TYPE` | encryption type: `none` (plaintext) or `openpgp`; the choice is explicit so a run can never silently come out unencrypted |
@@ -57,19 +69,23 @@ its environment variable; the command line wins.
 A declared type requires its value flag, and a value flag requires its
 declared type — so a second `--local-source` is a duplicate value, not a
 second source, and `--local-source` without `--source-type local` is an
-error (`--encryption-type` / `--recipient` follow the same rule). A
-preflight failure writes nothing to any target.
+error. The S3 destination follows the same rule, tightened: `--target-type s3`
+requires **all seven** `--s3-*` flags, and any `--s3-*` flag without
+`--target-type s3` is an error. Nothing about the S3 destination is silently
+defaulted — no implicit endpoint, region, prefix or addressing style.
+`--encryption-type` / `--recipient` follow the same rule. A preflight failure
+writes nothing to any target.
 
 The timestamp is UTC, the **start** time, at second precision. If a target
 already holds this run's file name (a re-run within the same second), the run
 aborts **before doing any backup work** instead of overwriting the previous
-archive.
+archive — the check applies to local files **and** to the S3 object.
 
-On success the delivered archive path is printed to stdout, **one line per
-target**, in target order, and the exit code is 0. On failure the reason goes
-to stderr and the exit code is non-zero; when delivery fails for some but not
-all targets, every failing target is named and the already-delivered ones
-stay.
+On success one line per target is printed to stdout, in target order: the
+delivered local path, or `s3://<bucket>/<key>` for the S3 target, and the exit
+code is 0. On failure the reason goes to stderr and the exit code is
+non-zero; when delivery fails for some but not all targets, every failing
+target is named and the already-delivered ones stay.
 
 ### Examples
 
@@ -87,9 +103,21 @@ vaultwarden-backup \
   --name vaultwarden-backup --database-type sqlite --encryption-type openpgp \
   --recipient AAAABBBBCCCCDDDD111122223333444455556666
 
-# environment only (cron / systemd)
+# S3-compatible target (Cloudflare R2), encrypted (plaintext is never uploaded)
+vaultwarden-backup \
+  --source-type local --local-source /srv/vaultwarden/data \
+  --target-type s3 --s3-endpoint https://<account_id>.r2.cloudflarestorage.com \
+  --s3-region auto --s3-access-key <R2_ACCESS_KEY> --s3-secret-key <R2_SECRET_KEY> \
+  --s3-bucket my-backups --s3-prefix / --s3-addressing path-style \
+  --name vaultwarden-backup --database-type sqlite --encryption-type openpgp \
+  --recipient AAAABBBBCCCCDDDD111122223333444455556666
+
+# local AND S3 in one run (--target-type local,s3), environment only (cron / systemd)
 export VWB_SOURCE_TYPE=local VWB_LOCAL_SOURCE=/srv/vaultwarden/data
-export VWB_TARGET_TYPE=local VWB_LOCAL_TARGET=/backup
+export VWB_TARGET_TYPE=local,s3 VWB_LOCAL_TARGET=/backup
+export VWB_S3_ENDPOINT=https://s3.eu-central-1.wasabisys.com VWB_S3_REGION=eu-central-1
+export VWB_S3_ACCESS_KEY=<KEY> VWB_S3_SECRET_KEY=<SECRET> VWB_S3_BUCKET=backups
+export VWB_S3_PREFIX=host-a VWB_S3_ADDRESSING=virtual-hosted
 export VWB_NAME=vaultwarden-backup VWB_DATABASE_TYPE=sqlite
 export VWB_ENCRYPTION_TYPE=openpgp
 export VWB_RECIPIENTS=AAAABBBBCCCCDDDD111122223333444455556666
@@ -99,6 +127,41 @@ vaultwarden-backup
 ```cron
 0 3 * * * VWB_SOURCE_TYPE=local VWB_LOCAL_SOURCE=/srv/vaultwarden/data VWB_TARGET_TYPE=local VWB_LOCAL_TARGET=/backup VWB_NAME=vaultwarden-backup VWB_DATABASE_TYPE=sqlite VWB_ENCRYPTION_TYPE=openpgp VWB_RECIPIENTS=<FINGERPRINT> /usr/local/bin/vaultwarden-backup >> /var/log/vwb-backup.log 2>&1
 ```
+
+## S3-compatible object storage targets
+
+`--target-type s3` streams the finished archive (`<name>-<timestamp>.tgz`, or
+`.tgz.gpg` when encrypted) to an S3-compatible object store — AWS S3 and
+stores like Cloudflare R2, Wasabi, Backblaze B2, MinIO or RustFS are all
+treated the same; nothing is AWS-specific.
+
+- **Everything is explicit, nothing is defaulted.** All seven flags are
+  required with `--target-type s3`, so a run can never quietly reach the
+  wrong endpoint, region or bucket: `--s3-endpoint`, `--s3-region`,
+  `--s3-access-key`, `--s3-secret-key`, `--s3-bucket`, `--s3-prefix`,
+  `--s3-addressing`. The bucket must already exist (the tool does not create
+  buckets).
+- `--s3-prefix` organizes keys under a prefix: `--s3-prefix weekly` produces
+  `weekly/<name>-<timestamp>.tgz` (useful for per-host separation in one
+  bucket or per-prefix lifecycle rules). `/` or the empty string means bucket
+  root. Paths are normalized: leading/trailing slashes are trimmed, so
+  `weekly/` is the same as `weekly`.
+- `--s3-addressing` picks the request addressing style explicitly:
+  `virtual-hosted` (`https://<bucket>.<endpoint>/<key>`, for AWS and most
+  managed S3-compatible stores) or `path-style`
+  (`https://<endpoint>/<bucket>/<key>`, for IP/self-hosted and R2 endpoints,
+  which cannot resolve `<bucket>.host`).
+- **No overwrites, ever:** an S3 object with this run's file name already
+  present (a same-second re-run) aborts the run before any backup work, and
+  the upload re-checks right before it starts — the same semantics as local
+  targets.
+- The upload is a streaming multipart upload; the object only appears
+  atomically when complete, and memory stays flat even for very large
+  archives. With `--encryption-type openpgp` only the encrypted file is
+  uploaded; the plaintext archive never leaves the scratch directory.
+- At most one S3 target per run; combine with local targets via
+  `--target-type local,s3`. Success prints one line per target — the local
+  path first, then `s3://<bucket>/<key>`.
 
 ## Online backup notes
 
