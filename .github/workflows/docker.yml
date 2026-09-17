@@ -2,7 +2,6 @@ name: Docker
 
 on:
   push:
-    branches: [master]
     tags:
       - "v[0-9]+.[0-9]+.[0-9]+"
       - "v[0-9]+.[0-9]+.[0-9]+-*"
@@ -22,6 +21,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Checkout defaults to depth-1, which would make the master-ancestry
+          # check below impossible; fetch the full history once.
+          fetch-depth: 0
+
+      # Docker tags only fire on version tag pushes. Tags can sit on any
+      # commit and tag events carry no branch info, so refuse anything not
+      # reachable from master up front — mirrors the release gate.
+      - name: Require tag to point into master
+        run: |
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/master \
+            || { echo "tag ${GITHUB_REF#refs/tags/} does not point into master"; exit 1; }
 
       # amd64 natively, arm64 under QEMU.
       - uses: docker/setup-qemu-action@v3
@@ -34,16 +45,17 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # latest tracks master; v1.2.3 -> 1.2.3, 1.2, 1. Prerelease tags
-      # (v1.2.3-rc.1) contain a dash, so the major/minor flattens are
-      # disabled for them to avoid overwriting stable tags.
+      # latest tracks the most recent stable release; v1.2.3 -> 1.2.3, 1.2,
+      # 1, latest. Prerelease tags (v1.2.3-rc.1) contain a dash, so the
+      # latest/major/minor tags are disabled for them to avoid overwriting
+      # stable tags.
       - name: Generate image tags
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/${{ github.repository }}
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=latest,enable=${{ !contains(github.ref, '-') }}
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}},enable=${{ !contains(github.ref, '-') }}
             type=semver,pattern={{major}},enable=${{ !contains(github.ref, '-') }}
