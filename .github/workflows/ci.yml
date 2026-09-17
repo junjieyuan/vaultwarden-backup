@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The runner's preinstalled rustup reads rust-toolchain.toml and
+      # installs the pinned toolchain (with clippy/rustfmt) on first
+      # cargo invocation, so no toolchain action is needed.
+      # The integration tests generate throwaway OpenPGP keys in a temporary
+      # GNUPGHOME, so gpg must be on PATH.
+      - name: Install gpg
+        run: sudo apt-get update && sudo apt-get install -y gnupg
+      - name: Check formatting
+        run: cargo fmt --check
+      - name: Lint
+        run: cargo clippy --all-targets --all-features
+      - name: Test
+        run: cargo test --all-targets --locked
+      - name: Build release
+        run: cargo build --release --locked

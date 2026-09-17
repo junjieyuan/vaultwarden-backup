@@ -1,0 +1,25 @@
+# `conventional-pre-commit` validates the Conventional Commits format agreed
+# in AGENTS.md. The local hooks run repo-wide cargo commands, so they trigger
+# on any .rs change and pass no file names (pass_filenames: false).
+repos:
+  - repo: https://github.com/compilerla/conventional-pre-commit
+    rev: v4.3.0
+    hooks:
+      - id: conventional-pre-commit
+        stages: [commit-msg]
+        # Allowed types, in sync with AGENTS.md's commit convention.
+        args: [feat, fix, docs, style, refactor, perf, test, build, ci, chore]
+  - repo: local
+    hooks:
+      - id: rust-fmt
+        name: cargo fmt (enforce formatting)
+        entry: cargo fmt
+        language: system
+        pass_filenames: false
+        files: '\.rs$'
+      - id: rust-clippy
+        name: cargo clippy (deny warnings)
+        entry: cargo clippy --all-targets --all-features
+        language: system
+        pass_filenames: false
+        files: '\.rs$'

@@ -2,5 +2,32 @@
 name = "vaultwarden-backup"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.98"
+description = "Backup a vaultwarden data directory to a timestamped .tgz (SQLite online backup + file tar)"
+license = "MIT"
 
 [dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive", "env"] }
+flate2 = "1"
+rusqlite = { version = "0.32", features = ["bundled", "backup"] }
+tar = "0.4"
+tempfile = "3"
+time = { version = "0.3", features = ["formatting", "macros"] }
+
+[lints.rust]
+# Warnings are errors everywhere; set here (not a `-- -D warnings` flag) so
+# build, clippy and the hooks share one policy.
+warnings = "deny"
+
+[lints.clippy]
+# clippy lints have their own namespace, so this is in addition to the
+# `warnings` group above.
+all = "deny"
+# No unwrap/expect in production code; test builds opt out in src/lib.rs
+# (cfg_attr(test, allow(..))) and tests/integration.rs.
+unwrap_used = "deny"
+expect_used = "deny"
+
+[profile.release]
+strip = true
