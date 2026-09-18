@@ -638,6 +638,11 @@ fn gpg_bad_recipient_fails_before_anything() {
     let src = make_sample_source(root);
     let target = root.join("out");
 
+    // Empty throwaway homedir: the unknown fingerprint is then absent
+    // from a working (empty) keyring, so the preflight fails with the
+    // keyring-specific error — without ever opening a real keyring.
+    let g1 = root.join("g1");
+    fs::create_dir_all(&g1).unwrap();
     let mut cmd = backup_cmd(
         &src,
         &target,
@@ -645,13 +650,50 @@ fn gpg_bad_recipient_fails_before_anything() {
         "openpgp",
         &["0000000000000000000000000000000000000000"],
     );
-    cmd.env_remove("GNUPGHOME");
+    cmd.env("GNUPGHOME", &g1);
     let out = cmd.output().unwrap();
     assert!(!out.status.success(), "unknown recipient must fail");
     let stderr = String::from_utf8_lossy(&out.stderr).to_string();
     assert!(
         stderr.contains("gpg keyring"),
         "error must point at the keyring: {stderr}"
+    );
+    assert!(
+        !target.exists(),
+        "nothing may be written on preflight failure"
+    );
+}
+
+#[test]
+fn gpg_failing_list_keys_fails_before_anything() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let src = make_sample_source(root);
+    let target = root.join("out");
+
+    // A GNUPGHOME gpg itself cannot use: the homedir is a file, so
+    // gpg's keyring access fails and --list-keys exits non-zero.
+    // The preflight must report that gpg failure, not a missing key.
+    let g1 = root.join("g1");
+    fs::write(&g1, b"not a directory").unwrap();
+    let mut cmd = backup_cmd(
+        &src,
+        &target,
+        "n",
+        "openpgp",
+        &["0000000000000000000000000000000000000000"],
+    );
+    cmd.env("GNUPGHOME", &g1);
+    let out = cmd.output().unwrap();
+    assert!(!out.status.success(), "broken homedir must fail");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        stderr.contains("--list-keys failed"),
+        "error must report the gpg failure: {stderr}"
+    );
+    assert!(
+        !stderr.contains("gpg keyring"),
+        "a gpg failure is not a missing key: {stderr}"
     );
     assert!(
         !target.exists(),
