@@ -31,6 +31,9 @@ jobs:
           --health-interval 5s --health-timeout 5s --health-retries 30
     steps:
       - uses: actions/checkout@v4
+      # Cache the cargo registry and dependency builds between runs so
+      # clippy/test don't recompile every dependency from scratch.
+      - uses: Swatinem/rust-cache@v2
       # The runner's preinstalled rustup reads rust-toolchain.toml and
       # installs the pinned toolchain (with clippy/rustfmt) on first
       # cargo invocation, so no toolchain action is needed.
