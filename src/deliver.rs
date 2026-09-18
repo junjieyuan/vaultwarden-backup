@@ -6,6 +6,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use time::OffsetDateTime;
+
+use crate::{RetentionPeriod, archive_stamp, should_delete};
 
 /// Copy the finished artifact to every local target, atomically per target
 /// (`.part` -> rename). Targets are independent: one failing target does not
@@ -111,6 +114,63 @@ fn deliver_one(final_path: &Path, part: &Path, dest: &Path) -> Result<()> {
         let _ = fs::remove_file(part);
     }
     result
+}
+
+/// Best-effort retention cleanup for one local target: delete this run's own
+/// archives (`<name>-<UTC stamp>.tgz[.gpg]`) whose stamp is older than
+/// `period`. A failure here must never break a successful backup, so this
+/// returns `()` and reports problems on stderr, then keeps going — a single
+/// unreadable entry cannot stop the cleanup of the rest.
+pub(crate) fn cleanup_retention(
+    dir: &Path,
+    name: &str,
+    own_stamp: &str,
+    now: OffsetDateTime,
+    period: &RetentionPeriod,
+) {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(err) => {
+            eprintln!(
+                "retention: cannot read target {} for cleanup ({err}); leaving it unchanged",
+                dir.display()
+            );
+            return;
+        }
+    };
+    for entry in entries {
+        let Ok(entry) = entry else {
+            eprintln!(
+                "retention: cannot read an entry in {}; skipping it",
+                dir.display()
+            );
+            continue;
+        };
+        let file_name = entry.file_name().to_string_lossy().into_owned();
+        // Only regular files can be archives; skip subdirectories and other
+        // types (a symlink is not a file, so it is skipped too).
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_file() {
+            continue;
+        }
+        let Some(stamp) = archive_stamp(&file_name, name) else {
+            continue;
+        };
+        if !should_delete(own_stamp, &stamp, &now, period) {
+            continue;
+        }
+        let path = entry.path();
+        if let Err(err) = fs::remove_file(&path) {
+            eprintln!(
+                "retention: warning: cannot remove {} ({err}); keeping it",
+                path.display()
+            );
+            continue;
+        }
+        eprintln!("retention: removed {}", path.display());
+    }
 }
 
 #[cfg(test)]

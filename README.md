@@ -40,6 +40,7 @@ vaultwarden-backup
    --s3-secret-key <SECRET> --s3-bucket <BUCKET> --s3-prefix <PREFIX>
    --s3-addressing <virtual-hosted|path-style>]
   --name <NAME> --database-type <TYPE> --encryption-type <TYPE>
+  --retention-period <PERIOD>
   [--recipient <FPR>]...
 ```
 
@@ -62,6 +63,7 @@ its environment variable; the command line wins.
 | `--name` | `VWB_NAME` | archive name prefix (final file is `<name>-<YYYY-MM-DDTHH:MM:SSZ>.tgz`); at most 200 bytes, must not contain `/` (any other character, including non-ASCII, is fine) |
 | `--database-type` | `VWB_DATABASE_TYPE` | database type; only `sqlite` is supported |
 | `--encryption-type` | `VWB_ENCRYPTION_TYPE` | encryption type: `none` (plaintext) or `openpgp`; the choice is explicit so a run can never silently come out unencrypted |
+| `--retention-period` | `VWB_RETENTION_PERIOD` | how long to keep previous archives, **required** and always supplied; exactly `unlimited` (keep everything) or a positive integer followed by `d` (days) or `h` (hours), e.g. `14d`, `72h`; see **Retention** |
 | `--recipient` | `VWB_RECIPIENTS` | OpenPGP **40-hex-digit fingerprint** (short keyids are rejected; primary or subkey) — repeat `--recipient`, or comma-separate (`A,B`); `VWB_RECIPIENTS` is also comma-separated; **required** with `--encryption-type openpgp`, **forbidden** with `none`; public key must be in the local gpg keyring; see **Encryption** |
 
 ### Type/value cross-checks
@@ -94,14 +96,16 @@ target is named and the already-delivered ones stay.
 vaultwarden-backup \
   --source-type local --local-source /srv/vaultwarden/data \
   --target-type local --local-target /backup \
-  --name vaultwarden-backup --database-type sqlite --encryption-type none
+  --name vaultwarden-backup --database-type sqlite --encryption-type none \
+  --retention-period 30d
 
 # two local destinations, encrypted (recipients may be repeated or comma-separated)
 vaultwarden-backup \
   --source-type local --local-source /srv/vaultwarden/data \
   --target-type local --local-target /backup,/backup-raid \
   --name vaultwarden-backup --database-type sqlite --encryption-type openpgp \
-  --recipient AAAABBBBCCCCDDDD111122223333444455556666
+  --recipient AAAABBBBCCCCDDDD111122223333444455556666 \
+  --retention-period 14d
 
 # S3-compatible target (Cloudflare R2), encrypted (plaintext is never uploaded)
 vaultwarden-backup \
@@ -110,7 +114,8 @@ vaultwarden-backup \
   --s3-region auto --s3-access-key <R2_ACCESS_KEY> --s3-secret-key <R2_SECRET_KEY> \
   --s3-bucket my-backups --s3-prefix / --s3-addressing path-style \
   --name vaultwarden-backup --database-type sqlite --encryption-type openpgp \
-  --recipient AAAABBBBCCCCDDDD111122223333444455556666
+  --recipient AAAABBBBCCCCDDDD111122223333444455556666 \
+  --retention-period 14d
 
 # local AND S3 in one run (--target-type local,s3), environment only (cron / systemd)
 export VWB_SOURCE_TYPE=local VWB_LOCAL_SOURCE=/srv/vaultwarden/data
@@ -121,11 +126,12 @@ export VWB_S3_PREFIX=host-a VWB_S3_ADDRESSING=virtual-hosted
 export VWB_NAME=vaultwarden-backup VWB_DATABASE_TYPE=sqlite
 export VWB_ENCRYPTION_TYPE=openpgp
 export VWB_RECIPIENTS=AAAABBBBCCCCDDDD111122223333444455556666
+export VWB_RETENTION_PERIOD=14d
 vaultwarden-backup
 ```
 
 ```cron
-0 3 * * * VWB_SOURCE_TYPE=local VWB_LOCAL_SOURCE=/srv/vaultwarden/data VWB_TARGET_TYPE=local VWB_LOCAL_TARGET=/backup VWB_NAME=vaultwarden-backup VWB_DATABASE_TYPE=sqlite VWB_ENCRYPTION_TYPE=openpgp VWB_RECIPIENTS=<FINGERPRINT> /usr/local/bin/vaultwarden-backup >> /var/log/vwb-backup.log 2>&1
+0 3 * * * VWB_SOURCE_TYPE=local VWB_LOCAL_SOURCE=/srv/vaultwarden/data VWB_TARGET_TYPE=local VWB_LOCAL_TARGET=/backup VWB_NAME=vaultwarden-backup VWB_DATABASE_TYPE=sqlite VWB_ENCRYPTION_TYPE=openpgp VWB_RECIPIENTS=<FINGERPRINT> VWB_RETENTION_PERIOD=14d /usr/local/bin/vaultwarden-backup >> /var/log/vwb-backup.log 2>&1
 ```
 
 ## S3-compatible object storage targets
@@ -216,6 +222,39 @@ variable.
 - With recipients, the output is `<name>-<timestamp>.tgz.gpg`; the
   plaintext `.tgz` is deleted once encryption succeeded and never lingers,
   even on failure.
+
+## Retention
+
+`--retention-period` (or `VWB_RETENTION_PERIOD`) is **always required** and is
+how you control how many previous archives to keep. It is not optional: a run
+must state its policy explicitly rather than silently default to keeping
+everything. The value is exactly one of:
+
+- `unlimited` — keep every archive, no cleanup (the safe "keep everything"
+  choice; nothing is ever deleted);
+- `<N>d` — a positive integer `N` followed by `d` (days), e.g. `14d`;
+- `<N>h` — a positive integer `N` followed by `h` (hours), e.g. `72h`.
+
+Any other value (zero, `0d`, a missing unit, a sign, a decimal, …) is rejected
+at parse time, naming the flag.
+
+**How cleanup works** (best-effort, on success only):
+
+- After the archive is **fully delivered** to every target (and only then — a
+  failed run deletes nothing), cleanup walks each local target directory and,
+  for an S3 target, one level below its `--s3-prefix`.
+- It matches only this tool's own archives — a file name exactly
+  `<name>-<UTC stamp>.tgz` (or `.tgz.gpg` when encrypted). Anything else,
+  including other programs' files and archives under a different `--name`, is
+  left untouched.
+- An archive is deleted when its stamp is strictly older than the period;
+  one exactly at the period boundary is **kept**. This run's own archive
+  (the one just delivered) is always kept, even if it is older than the
+  period — the stamp is fixed at the start of the run.
+- Cleanup is best-effort by design: a cleanup failure is logged to stderr
+  (`retention: warning: …` / `retention: removed …`) and never turns a
+  successful backup into a failure. The stdout contract (one line per
+  target) and the exit code are unchanged.
 
 ## Restore
 

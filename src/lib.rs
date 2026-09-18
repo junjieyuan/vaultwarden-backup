@@ -49,6 +49,21 @@ pub enum EncryptionType {
     Openpgp,
 }
 
+/// Retention period for previously delivered archives of this run's name.
+/// `unlimited` keeps everything; a value is one of `unlimited`, `<N>d`
+/// (days), or `<N>h` (hours) with `N` a positive integer. After a fully
+/// successful run, archives named `<name>-<UTC stamp>.tgz[.gpg]` older than
+/// the period are deleted from each local target and the S3 prefix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetentionPeriod {
+    /// Keep every archive; cleanup is a no-op.
+    Unlimited,
+    /// Delete archives whose stamp is more than `n` days old.
+    Days(u64),
+    /// Delete archives whose stamp is more than `n` hours old.
+    Hours(u64),
+}
+
 /// A single destination: a local directory or an S3-compatible object store.
 /// Local targets are delivered with the `.part` + rename choreography in
 /// `deliver`; the S3 target gets a multipart upload in `s3`. A run has any
@@ -114,6 +129,7 @@ pub fn run(
     database_type: DatabaseType,
     encryption_type: EncryptionType,
     recipients: Vec<String>,
+    retention_period: RetentionPeriod,
 ) -> Result<Vec<Delivered>> {
     // The archive name becomes a file-name prefix; reject path separators
     // (and NUL, which every path API refuses) before anything else.
@@ -275,6 +291,25 @@ pub fn run(
         }
     }
     if failures.is_empty() {
+        // Retention cleanup runs only after a fully successful delivery, so a
+        // failed run never deletes anything. It is best-effort by design: a
+        // cleanup failure must not turn a successful backup into a failure,
+        // so it returns `()` and logs to stderr, never an `Err`.
+        let now = OffsetDateTime::now_utc();
+        for dir in &targets {
+            deliver::cleanup_retention(dir, &name, &stamp, now, &retention_period);
+        }
+        if let (Some(s3), Some(client)) = (&s3_target, &s3_client) {
+            s3::cleanup_retention(
+                client,
+                &s3.bucket,
+                &s3.prefix,
+                &name,
+                &stamp,
+                now,
+                &retention_period,
+            );
+        }
         Ok(delivered)
     } else if failures.len() == 1 {
         // A single failure (typically the local-only case) keeps the
@@ -296,6 +331,67 @@ pub fn stamp(dt: &OffsetDateTime) -> String {
     // The description is a compile-time constant; formatting cannot fail.
     #[allow(clippy::expect_used)]
     dt.format(fmt).expect("format static description")
+}
+
+/// The second-precision UTC stamp that `stamp()` writes, back to a moment.
+/// `UtcDateTime::parse` (not `OffsetDateTime::parse`): the trailing `Z` is a
+/// literal in the format description, not an offset, so a missing offset must
+/// default to UTC rather than fail with `InsufficientInformation`.
+fn parse_stamp(stamp: &str) -> Option<OffsetDateTime> {
+    let fmt = format_description!("[year]-[month]-[day]T[hour]:[minute]:[second]Z");
+    Some(OffsetDateTime::from(
+        time::UtcDateTime::parse(stamp, &fmt).ok()?,
+    ))
+}
+
+/// Parse the stamp out of an archive file name of this run: it must begin
+/// with `<name>-` and end exactly `.tgz` or `.tgz.gpg`, with a parseable
+/// second-precision UTC stamp in between. The single predicate shared by the
+/// local and S3 retention cleanup, so both match identical names.
+pub fn archive_stamp(file_name: &str, name: &str) -> Option<OffsetDateTime> {
+    let prefix = format!("{name}-");
+    let rest = file_name.strip_prefix(prefix.as_str())?;
+    let middle = if let Some(stamp) = rest.strip_suffix(".tgz") {
+        stamp
+    } else {
+        rest.strip_suffix(".tgz.gpg")?
+    };
+    parse_stamp(middle)
+}
+
+/// Whether a matched archive (already parsed to `stamp`) is old enough to
+/// delete under `period`, as of `now`. Exactly-at-period is kept; this run's
+/// fresh archive (`stamp` equal to `own_stamp`, the stamp minted at run
+/// start) is never deleted, even by a run that outlives the period — the
+/// stamp is fixed at start, not end. All arithmetic is in i128 nanoseconds,
+/// so no overflow is possible and the panic-on-overflow `SignedDuration`
+/// helpers are not needed.
+pub fn should_delete(
+    own_stamp: &str,
+    archived: &OffsetDateTime,
+    now: &OffsetDateTime,
+    period: &RetentionPeriod,
+) -> bool {
+    // `archived` is this archive's minted stamp; compare it as a string to
+    // this run's own stamp, so the fresh artifact is never deleted. The
+    // parameter is named `archived` (not `stamp`) so it does not shadow the
+    // `stamp()` formatter used here.
+    if stamp(archived) == own_stamp {
+        return false;
+    }
+    let Some(period_ns) = retention_nanos(period) else {
+        return false;
+    };
+    archived.unix_timestamp_nanos() < now.unix_timestamp_nanos() - period_ns
+}
+
+/// Nanoseconds in `period`; `None` for `Unlimited` (nothing is deleted).
+fn retention_nanos(period: &RetentionPeriod) -> Option<i128> {
+    match *period {
+        RetentionPeriod::Unlimited => None,
+        RetentionPeriod::Days(n) => Some(n as i128 * 86_400_000_000_000),
+        RetentionPeriod::Hours(n) => Some(n as i128 * 3_600_000_000_000),
+    }
 }
 
 /// The archive name is used verbatim as a file-name prefix: forbid the path
@@ -340,6 +436,72 @@ mod tests {
         assert_eq!(&s[4..5], "-");
         assert_eq!(&s[10..11], "T");
         assert_eq!(&s[13..14], ":");
+    }
+
+    #[test]
+    fn archive_stamp_round_trips_both_extensions() {
+        let now = OffsetDateTime::from_unix_timestamp(1_784_718_299).unwrap();
+        let s = stamp(&now);
+        assert_eq!(archive_stamp(&format!("vault-{s}.tgz"), "vault"), Some(now));
+        assert_eq!(
+            archive_stamp(&format!("vault-{s}.tgz.gpg"), "vault"),
+            Some(now)
+        );
+    }
+
+    #[test]
+    fn archive_stamp_rejects_other_names() {
+        let now = OffsetDateTime::from_unix_timestamp(1_784_718_299).unwrap();
+        let s = stamp(&now);
+        // Different archive name: the prefix does not line up.
+        assert_eq!(archive_stamp(&format!("other-{s}.tgz"), "vault"), None);
+        // Not an archive of this name at all.
+        assert_eq!(archive_stamp("vault.tgz", "vault"), None);
+        // A name with no parseable stamp in between.
+        assert_eq!(archive_stamp("vault-nothing.tgz", "vault"), None);
+        // Right prefix, but the middle is not a stamp.
+        assert_eq!(archive_stamp("vault-2020-01-01.tgz", "vault"), None);
+        // Wrong extension.
+        assert_eq!(archive_stamp(&format!("vault-{s}.tar"), "vault"), None);
+    }
+
+    #[test]
+    fn should_delete_applies_the_period_boundary() {
+        let now = OffsetDateTime::from_unix_timestamp(1_784_718_299).unwrap();
+        let one_day = 86_400;
+        let old = OffsetDateTime::from_unix_timestamp(now.unix_timestamp() - one_day - 1).unwrap();
+        let fresh = OffsetDateTime::from_unix_timestamp(now.unix_timestamp() - 1).unwrap();
+        let exactly = OffsetDateTime::from_unix_timestamp(now.unix_timestamp() - one_day).unwrap();
+        let period = RetentionPeriod::Days(1);
+        assert!(
+            should_delete("irrelevant", &old, &now, &period),
+            "older than a day is deleted"
+        );
+        assert!(
+            !should_delete("irrelevant", &fresh, &now, &period),
+            "fresh archive is kept"
+        );
+        assert!(
+            !should_delete("irrelevant", &exactly, &now, &period),
+            "exactly at the period is kept (strictly-older wins)"
+        );
+        assert!(
+            !should_delete("irrelevant", &old, &now, &RetentionPeriod::Unlimited),
+            "unlimited never deletes"
+        );
+    }
+
+    #[test]
+    fn should_delete_skips_this_runs_own_stamp() {
+        let now = OffsetDateTime::from_unix_timestamp(1_784_718_299).unwrap();
+        let old = OffsetDateTime::from_unix_timestamp(now.unix_timestamp() - 86_400 - 1).unwrap();
+        let period = RetentionPeriod::Days(1);
+        // Even an old archive is skipped when its stamp is this run's own
+        // stamp: the short-circuit wins before the age check.
+        assert!(
+            !should_delete(&stamp(&old), &old, &now, &period),
+            "own-stamp short-circuit beats an old stamp"
+        );
     }
 
     #[test]
@@ -399,6 +561,7 @@ mod tests {
             DatabaseType::Sqlite,
             EncryptionType::None,
             Vec::new(),
+            RetentionPeriod::Unlimited,
         )
         .unwrap_err();
         assert!(err.to_string().contains("at most one S3 target"), "{err:?}");
@@ -441,6 +604,7 @@ mod tests {
                 DatabaseType::Sqlite,
                 EncryptionType::None,
                 Vec::new(),
+                RetentionPeriod::Unlimited,
             );
             if delivered.is_err() {
                 collided = true;

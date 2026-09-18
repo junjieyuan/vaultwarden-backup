@@ -12,9 +12,10 @@ use std::sync::OnceLock;
 use anyhow::{Context, Result, bail};
 use object_store::aws::{AmazonS3, AmazonS3Builder};
 use object_store::path::Path as StorePath;
-use object_store::{Error as StoreError, ObjectStoreExt, WriteMultipart};
+use object_store::{Error as StoreError, ObjectStore, ObjectStoreExt, WriteMultipart};
+use time::OffsetDateTime;
 
-use crate::{S3Addressing, S3Target};
+use crate::{RetentionPeriod, S3Addressing, S3Target, archive_stamp, should_delete};
 
 /// Shared tokio runtime, created once per process. `run()` stays synchronous
 /// and concurrent callers reuse one runtime. The creation `Result` is stored
@@ -82,6 +83,116 @@ pub(crate) fn ensure_object_free(client: &AmazonS3, key: &str) -> Result<()> {
         Ok(meta) => bail!("s3 object {key} already exists ({} bytes)", meta.size),
         Err(StoreError::NotFound { .. }) => Ok(()),
         Err(e) => Err(e).with_context(|| format!("check s3 object {key}")),
+    }
+}
+
+/// Which of the listed object keys must be deleted for `name` under `period`
+/// as of `now`. Pure: the caller lists the prefix and feeds every key, and
+/// this returns exactly the keys to delete — only this run's own archives
+/// (`<name>-<UTC stamp>.tgz[.gpg]`) whose stamp is older than the period.
+/// The stamp is parsed from each key's final path segment, the same way the
+/// local cleanup parses a file name, so both backends match identical names.
+/// The caller lists one level below the prefix, so only the direct archive
+/// keys ever reach here.
+pub(crate) fn retention_keys_to_delete(
+    now: &OffsetDateTime,
+    name: &str,
+    own_stamp: &str,
+    period: &RetentionPeriod,
+    keys: &[String],
+) -> Vec<String> {
+    let mut to_delete = Vec::new();
+    for key in keys {
+        let file_name = key.rsplit('/').next().unwrap_or(key);
+        let Some(stamp) = archive_stamp(file_name, name) else {
+            continue;
+        };
+        if should_delete(own_stamp, &stamp, now, period) {
+            to_delete.push(key.clone());
+        }
+    }
+    to_delete
+}
+
+/// Best-effort retention cleanup for the S3 prefix: delete this run's own
+/// archives older than `period`, one `delete` per expired key. A failure
+/// here must never break a successful backup, so this returns `()` and
+/// reports problems on stderr. The listing is non-recursive: objects one
+/// level below `prefix`; deeper keys arrive in `common_prefixes` and are
+/// ignored (retention only ever writes directly under the prefix).
+pub(crate) fn cleanup_retention(
+    client: &AmazonS3,
+    bucket: &str,
+    prefix: &str,
+    name: &str,
+    own_stamp: &str,
+    now: OffsetDateTime,
+    period: &RetentionPeriod,
+) {
+    // `/` and the empty string both mean "bucket root" (no list prefix); any
+    // other value is trimmed of leading/trailing slashes, exactly as
+    // `join_prefix` does when building the object keys.
+    let prefix = prefix.trim_matches('/');
+    // The listing prefix and the human-readable form are both derived once:
+    // `/` and the empty string mean "bucket root" (no prefix, `s3://<bucket>`),
+    // any other value is trimmed and shown with a leading slash.
+    let list_prefix: Option<StorePath> = if prefix.is_empty() {
+        None
+    } else {
+        Some(StorePath::from(prefix))
+    };
+    let list_display = match &list_prefix {
+        Some(p) => format!("/{}", p.as_ref()),
+        None => String::new(),
+    };
+    // `list_with_delimiter` returns `Result<ListResult, object_store::Error>`;
+    // the runtime wrapper from `block_on` adds one more `anyhow` layer, so
+    // both are checked — either failure just skips cleanup for this run.
+    let inner = match block_on(async { client.list_with_delimiter(list_prefix.as_ref()).await }) {
+        Ok(inner) => inner,
+        Err(err) => {
+            eprintln!(
+                "retention: cannot list s3://{}{} for cleanup ({err}); leaving it unchanged",
+                bucket, list_display
+            );
+            return;
+        }
+    };
+    let list = match inner {
+        Ok(list) => list,
+        Err(err) => {
+            eprintln!(
+                "retention: cannot list s3://{}{} for cleanup ({err}); leaving it unchanged",
+                bucket, list_display
+            );
+            return;
+        }
+    };
+    let keys: Vec<String> = list
+        .objects
+        .iter()
+        .map(|o| o.location.as_ref().to_string())
+        .collect();
+    for key in retention_keys_to_delete(&now, name, own_stamp, period, &keys) {
+        let location = StorePath::from(key.clone());
+        // `delete` returns `Result<(), object_store::Error>`; the runtime
+        // wrapper from `block_on` adds one more `anyhow` layer, so both are
+        // checked — either failure just keeps the object.
+        let inner = match block_on(client.delete(&location)) {
+            Ok(inner) => inner,
+            Err(err) => {
+                eprintln!(
+                    "retention: warning: cannot delete s3://{bucket}/{key} ({err}); keeping it"
+                );
+                continue;
+            }
+        };
+        match inner {
+            Ok(()) => eprintln!("retention: removed s3://{bucket}/{key}"),
+            Err(err) => eprintln!(
+                "retention: warning: cannot delete s3://{bucket}/{key} ({err}); keeping it"
+            ),
+        }
     }
 }
 
@@ -156,5 +267,29 @@ mod tests {
         assert_eq!(join_prefix("weekly/", "a.tgz"), "weekly/a.tgz");
         assert_eq!(join_prefix("/host-a/", "a.tgz"), "host-a/a.tgz");
         assert_eq!(join_prefix("a/b", "a.tgz"), "a/b/a.tgz");
+    }
+
+    #[test]
+    fn retention_keys_to_delete_selects_only_expired_own_archives() {
+        let now = OffsetDateTime::from_unix_timestamp(1_784_718_299).unwrap();
+        let period = RetentionPeriod::Days(7);
+        // Expired own archive (2020) is deleted; the fresh own archive and
+        // the foreign key (different name) are kept. The deep key is parsed
+        // from its final segment, which is a foreign name, so it is kept.
+        let keys = vec![
+            "ret/vault-2020-01-01T00:00:00Z.tgz".to_string(),
+            "ret/vault-2026-07-22T10:00:00Z.tgz".to_string(),
+            "ret/other-2020-01-01T00:00:00Z.tgz".to_string(),
+            "ret/deep/other-2020-01-01T00:00:00Z.tgz".to_string(),
+        ];
+        let deleted = retention_keys_to_delete(&now, "vault", "irrelevant", &period, &keys);
+        assert_eq!(deleted, vec!["ret/vault-2020-01-01T00:00:00Z.tgz"]);
+        // This run's own stamp is never deleted, even an old one: the
+        // short-circuit beats the age check.
+        let own = vec!["ret/vault-2020-01-01T00:00:00Z.tgz".to_string()];
+        assert!(
+            retention_keys_to_delete(&now, "vault", "2020-01-01T00:00:00Z", &period, &own)
+                .is_empty()
+        );
     }
 }

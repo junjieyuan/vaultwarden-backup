@@ -9,7 +9,7 @@ mod common;
 use std::fs;
 use std::path::Path;
 
-use vaultwarden_backup::{DatabaseType, Delivered, EncryptionType, Target};
+use vaultwarden_backup::{DatabaseType, Delivered, EncryptionType, RetentionPeriod, Target};
 
 use common::{DB, list_dir, make_sample_source, unpack};
 
@@ -48,6 +48,7 @@ fn happy_path_snapshot_and_files() {
         DatabaseType::Sqlite,
         EncryptionType::None,
         Vec::new(),
+        RetentionPeriod::Unlimited,
     )
     .unwrap();
 
@@ -150,6 +151,7 @@ fn multiple_local_targets_all_delivered() {
         DatabaseType::Sqlite,
         EncryptionType::None,
         Vec::new(),
+        RetentionPeriod::Unlimited,
     )
     .unwrap();
 
@@ -183,6 +185,7 @@ fn no_targets_fails() {
         DatabaseType::Sqlite,
         EncryptionType::None,
         Vec::new(),
+        RetentionPeriod::Unlimited,
     )
     .unwrap_err();
     assert!(err.to_string().contains("at least one target"), "{err:?}");
@@ -201,6 +204,7 @@ fn custom_name_prefix_is_used() {
         DatabaseType::Sqlite,
         EncryptionType::None,
         Vec::new(),
+        RetentionPeriod::Unlimited,
     )
     .unwrap();
     let fname = local_delivered(&delivered[0])
@@ -227,6 +231,7 @@ fn name_with_slash_fails_before_any_work() {
         DatabaseType::Sqlite,
         EncryptionType::None,
         Vec::new(),
+        RetentionPeriod::Unlimited,
     )
     .unwrap_err();
     assert!(
@@ -263,6 +268,7 @@ fn duplicate_target_delivered_once() {
         DatabaseType::Sqlite,
         EncryptionType::None,
         Vec::new(),
+        RetentionPeriod::Unlimited,
     )
     .unwrap();
     assert_eq!(delivered.len(), 1, "one delivery per physical directory");
@@ -282,6 +288,7 @@ fn missing_source_fails() {
         DatabaseType::Sqlite,
         EncryptionType::None,
         Vec::new(),
+        RetentionPeriod::Unlimited,
     )
     .unwrap_err();
     assert!(err.to_string().contains("does not exist"));
@@ -301,6 +308,7 @@ fn source_is_file_fails() {
         DatabaseType::Sqlite,
         EncryptionType::None,
         Vec::new(),
+        RetentionPeriod::Unlimited,
     )
     .unwrap_err();
     assert!(err.to_string().contains("not a directory"));
@@ -321,6 +329,7 @@ fn source_without_db_fails() {
         DatabaseType::Sqlite,
         EncryptionType::None,
         Vec::new(),
+        RetentionPeriod::Unlimited,
     )
     .unwrap_err();
     // The existence check now lives inside db::backup, so the message is
@@ -349,6 +358,7 @@ fn source_and_target_nested_fails() {
         DatabaseType::Sqlite,
         EncryptionType::None,
         Vec::new(),
+        RetentionPeriod::Unlimited,
     )
     .unwrap_err();
     assert!(err.to_string().contains("nested"));
@@ -375,6 +385,7 @@ fn live_wal_source_still_backs_up() {
         DatabaseType::Sqlite,
         EncryptionType::None,
         Vec::new(),
+        RetentionPeriod::Unlimited,
     )
     .unwrap();
     conn.execute("ROLLBACK", ()).unwrap();
@@ -392,4 +403,81 @@ fn live_wal_source_still_backs_up() {
         )
         .unwrap();
     assert_eq!(n, 0);
+}
+
+// A 20-char UTC stamp well past any retention window, used to seed an
+// "already expired" archive on disk.
+const EXPIRED_STAMP: &str = "2020-01-02T03:04:05Z";
+
+#[test]
+fn retention_cleanup_deletes_expired_archives() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let src = make_sample_source(root);
+    let target = root.join("backups");
+    fs::create_dir_all(&target).unwrap();
+
+    // Seed an expired own archive and a foreign old file that must survive.
+    let expired = target.join(format!("vaultwarden-backup-{EXPIRED_STAMP}.tgz"));
+    fs::write(&expired, b"old bytes").unwrap();
+    let foreign = target.join("someone-else-2020-01-02T03:04:05Z.tgz");
+    fs::write(&foreign, b"foreign").unwrap();
+
+    let delivered = vaultwarden_backup::run(
+        src,
+        vec![Target::Local {
+            dir: target.clone(),
+        }],
+        "vaultwarden-backup".into(),
+        DatabaseType::Sqlite,
+        EncryptionType::None,
+        Vec::new(),
+        RetentionPeriod::Days(7),
+    )
+    .unwrap();
+
+    let fresh = local_delivered(&delivered[0]);
+    assert!(fresh.exists(), "the fresh archive must be delivered");
+    assert!(!expired.exists(), "expired own archive must be cleaned up");
+    assert!(foreign.exists(), "foreign files must be left alone");
+}
+
+#[test]
+fn failed_run_does_not_run_retention_cleanup() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let src = make_sample_source(root);
+    let target = root.join("backups");
+    fs::create_dir_all(&target).unwrap();
+
+    // An expired own archive that cleanup *would* remove if it ran.
+    let expired = target.join(format!("n-{EXPIRED_STAMP}.tgz"));
+    fs::write(&expired, b"old bytes").unwrap();
+
+    // A second target that is a regular file: copying into it fails delivery,
+    // so `run` must return an error *before* retention cleanup runs.
+    let broken = root.join("broken");
+    fs::write(&broken, b"not a directory").unwrap();
+
+    let err = vaultwarden_backup::run(
+        src,
+        vec![
+            Target::Local {
+                dir: target.clone(),
+            },
+            Target::Local { dir: broken },
+        ],
+        "n".into(),
+        DatabaseType::Sqlite,
+        EncryptionType::None,
+        Vec::new(),
+        RetentionPeriod::Days(7),
+    )
+    .unwrap_err();
+    let _ = err;
+
+    assert!(
+        expired.exists(),
+        "cleanup must not run when the backup fails"
+    );
 }
