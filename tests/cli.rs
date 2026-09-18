@@ -31,6 +31,7 @@ fn backup_cmd(
     cmd.arg("--name").arg(name);
     cmd.arg("--database-type").arg("sqlite");
     cmd.arg("--encryption-type").arg(encryption_type);
+    cmd.arg("--retention-period").arg("unlimited");
     for r in recipients {
         cmd.arg("--recipient").arg(*r);
     }
@@ -48,6 +49,7 @@ fn assert_usage_err(err: &anyhow::Error) {
         "--name",
         "--database-type",
         "--encryption-type",
+        "--retention-period",
     ] {
         assert!(s.contains(word), "usage missing {word}:\n{s}");
     }
@@ -82,6 +84,7 @@ fn cli_all_env_vars_succeed() {
     cmd.env("VWB_NAME", "env-run");
     cmd.env("VWB_DATABASE_TYPE", "sqlite");
     cmd.env("VWB_ENCRYPTION_TYPE", "none");
+    cmd.env("VWB_RETENTION_PERIOD", "unlimited");
     let out = cmd.output().unwrap();
     assert!(
         out.status.success(),
@@ -115,6 +118,7 @@ fn cli_cli_option_overrides_env() {
     cmd.env("VWB_NAME", "x");
     cmd.env("VWB_DATABASE_TYPE", "sqlite");
     cmd.env("VWB_ENCRYPTION_TYPE", "none");
+    cmd.env("VWB_RETENTION_PERIOD", "unlimited");
     cmd.arg("--local-target").arg(&target); // CLI wins
     let out = cmd.output().unwrap();
     assert!(
@@ -152,6 +156,7 @@ fn cli_multiple_local_targets_comma_and_repeat() {
     cmd.arg("--name").arg("multi");
     cmd.arg("--database-type").arg("sqlite");
     cmd.arg("--encryption-type").arg("none");
+    cmd.arg("--retention-period").arg("unlimited");
     let out = cmd.output().unwrap();
     assert!(
         out.status.success(),
@@ -196,6 +201,7 @@ fn cli_local_source_flag_missing_fails() {
     cmd.arg("--name").arg("n");
     cmd.arg("--database-type").arg("sqlite");
     cmd.arg("--encryption-type").arg("none");
+    cmd.arg("--retention-period").arg("unlimited");
     let out = cmd.output().unwrap();
     assert!(!out.status.success(), "missing --local-source must fail");
     let stderr = String::from_utf8_lossy(&out.stderr).to_string();
@@ -224,6 +230,7 @@ fn cli_local_target_flag_missing_fails() {
     cmd.arg("--name").arg("n");
     cmd.arg("--database-type").arg("sqlite");
     cmd.arg("--encryption-type").arg("none");
+    cmd.arg("--retention-period").arg("unlimited");
     let out = cmd.output().unwrap();
     assert!(!out.status.success(), "missing --local-target must fail");
     let stderr = String::from_utf8_lossy(&out.stderr).to_string();
@@ -534,6 +541,7 @@ fn gpg_recipients_via_env_var_comma_separated() {
     cmd.arg("--target-type").arg("local");
     cmd.arg("--local-target").arg(&target);
     cmd.arg("--name").arg("enc-env");
+    cmd.env("VWB_RETENTION_PERIOD", "unlimited");
     cmd.arg("--database-type").arg("sqlite");
     let out = cmd.output().unwrap();
     assert!(
@@ -574,6 +582,7 @@ fn gpg_recipients_via_env_var_comma_separated() {
     cmd.arg("--target-type").arg("local");
     cmd.arg("--local-target").arg(&target);
     cmd.arg("--name").arg("enc-env1");
+    cmd.env("VWB_RETENTION_PERIOD", "unlimited");
     cmd.arg("--database-type").arg("sqlite");
     let out = cmd.output().unwrap();
     assert!(
@@ -607,6 +616,7 @@ fn gpg_recipients_via_env_var_comma_separated() {
     cmd.arg("--target-type").arg("local");
     cmd.arg("--local-target").arg(&target);
     cmd.arg("--name").arg("enc-override");
+    cmd.env("VWB_RETENTION_PERIOD", "unlimited");
     cmd.arg("--database-type").arg("sqlite");
     cmd.arg("--recipient").arg(&fprs[0]);
     let out = cmd.output().unwrap();
@@ -745,6 +755,7 @@ fn cli_unsupported_database_type_fails_at_parse() {
     cmd.arg("--name").arg("n");
     cmd.arg("--database-type").arg("mysql");
     cmd.arg("--encryption-type").arg("none");
+    cmd.arg("--retention-period").arg("unlimited");
     let out = cmd.output().unwrap();
     assert!(!out.status.success(), "invalid db type must be rejected");
     let stderr = String::from_utf8_lossy(&out.stderr).to_string();
@@ -823,6 +834,7 @@ fn cli_unsupported_encryption_type_fails_at_parse() {
     cmd.arg("--name").arg("n");
     cmd.arg("--database-type").arg("sqlite");
     cmd.arg("--encryption-type").arg("rot13");
+    cmd.arg("--retention-period").arg("unlimited");
     let out = cmd.output().unwrap();
     assert!(!out.status.success(), "invalid enc type must be rejected");
     let stderr = String::from_utf8_lossy(&out.stderr).to_string();
@@ -849,4 +861,69 @@ fn cli_long_forms_work() {
         "stderr: {}",
         String::from_utf8_lossy(&out.stderr)
     );
+}
+
+// A full, otherwise-valid run with a bad `--retention-period` value: clap
+// rejects it at parse time (naming the flag) before any work, so nothing is
+// written.
+#[test]
+fn cli_retention_invalid_value_rejected() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let src = make_sample_source(root);
+    let target = root.join("out");
+
+    for bad in ["0d", "0h", "d", "h", "1x", "+1d", "abc", ""] {
+        let mut cmd = std::process::Command::new(bin());
+        cmd.arg("--source-type").arg("local");
+        cmd.arg("--local-source").arg(&src);
+        cmd.arg("--target-type").arg("local");
+        cmd.arg("--local-target").arg(&target);
+        cmd.arg("--name").arg("n");
+        cmd.arg("--database-type").arg("sqlite");
+        cmd.arg("--encryption-type").arg("none");
+        cmd.arg("--retention-period").arg(bad);
+        let out = cmd.output().unwrap();
+        assert!(
+            !out.status.success(),
+            "invalid retention value {bad:?} must fail"
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+        assert!(
+            stderr.contains("--retention-period"),
+            "error must name the flag: {stderr}"
+        );
+        assert!(!target.exists(), "nothing may be written on parse failure");
+    }
+}
+
+// Every accepted form (`<N>d`, `<N>h`, `unlimited`) must parse and deliver.
+#[test]
+fn cli_retention_period_valid_forms() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let src = make_sample_source(root);
+    for form in ["7d", "2h", "unlimited"] {
+        let target = root.join(format!("out-{form}"));
+        let mut cmd = std::process::Command::new(bin());
+        cmd.arg("--source-type").arg("local");
+        cmd.arg("--local-source").arg(&src);
+        cmd.arg("--target-type").arg("local");
+        cmd.arg("--local-target").arg(&target);
+        cmd.arg("--name").arg("n");
+        cmd.arg("--database-type").arg("sqlite");
+        cmd.arg("--encryption-type").arg("none");
+        cmd.arg("--retention-period").arg(form);
+        let out = cmd.output().unwrap();
+        assert!(
+            out.status.success(),
+            "valid retention value {form} must succeed; stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+        let lines: Vec<&str> = stdout.lines().collect();
+        assert_eq!(lines.len(), 1, "one stdout line per target: {stdout:?}");
+        let path: PathBuf = lines[0].into();
+        assert!(path.exists(), "missing {}", path.display());
+    }
 }

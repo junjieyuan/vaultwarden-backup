@@ -1,8 +1,12 @@
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
-use vaultwarden_backup::{DatabaseType, Delivered, EncryptionType, S3Addressing, S3Target, Target};
+use vaultwarden_backup::{
+    DatabaseType, Delivered, EncryptionType, RetentionPeriod, S3Addressing, S3Target, Target,
+};
 
 /// Back up a vaultwarden data directory to a timestamped .tgz archive,
 /// delivered to every local and/or S3-compatible target.
@@ -94,6 +98,18 @@ struct Cli {
     /// variable is split on commas as well.
     #[arg(long = "recipient", env = "VWB_RECIPIENTS", value_delimiter = ',')]
     recipients: Vec<String>,
+
+    /// Retention period for this archive name: `unlimited`, `<N>d` (days) or
+    /// `<N>h` (hours), N a positive integer. After a fully successful run,
+    /// archives of this name older than the period are removed from every
+    /// local target and the S3 prefix; `unlimited` keeps everything.
+    #[arg(
+        long = "retention-period",
+        required = true,
+        env = "VWB_RETENTION_PERIOD",
+        value_parser = parse_retention_period
+    )]
+    retention_period: RetentionPeriod,
 }
 
 /// Source types.
@@ -107,6 +123,55 @@ enum SourceType {
 enum TargetType {
     Local,
     S3,
+}
+
+/// A single `--retention-period` value that is not `unlimited`, `<N>d`, or
+/// `<N>h`. Clap hands this to the user as `invalid value '<v>' for
+/// '--retention-period': <message>`; `Display` therefore only supplies the
+/// message. It is a unit struct so no data is needed to reject a value.
+#[derive(Debug)]
+struct RetentionParseError;
+
+impl std::fmt::Display for RetentionParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "expected 'unlimited', or a positive integer followed by 'd' (days) or 'h' (hours)"
+        )
+    }
+}
+
+impl std::error::Error for RetentionParseError {}
+
+/// Parse one `--retention-period` value: `unlimited`, `<N>d`, or `<N>h` with
+/// `N` a positive integer. `value_parser = parse_retention_period` hands clap
+/// this fn pointer; a named fn returning `Result<T, E: Into<Box<dyn Error +
+/// Send + Sync>>>` implements `TypedValueParser` directly, so the parse
+/// failure surfaces as an `invalid value` error that names the flag.
+fn parse_retention_period(value: &str) -> Result<RetentionPeriod, RetentionParseError> {
+    if value == "unlimited" {
+        return Ok(RetentionPeriod::Unlimited);
+    }
+    // The value is `<N><unit>`: a positive integer followed by exactly one
+    // 'd' or 'h'. The final character is the unit; everything before it is
+    // the number, which must be one or more ASCII digits — a leading `+` or
+    // `-` (Rust parses `"+1"` as `u64`, but `-1` never fits) or a decimal
+    // point is not a positive integer, so require all digits explicitly.
+    // `strip_suffix` on a `char` keeps this char-safe, so no input panics.
+    let unit = value.chars().last().ok_or(RetentionParseError)?;
+    let digits = value.strip_suffix(unit).ok_or(RetentionParseError)?;
+    if digits.chars().any(|c| !c.is_ascii_digit()) {
+        return Err(RetentionParseError);
+    }
+    let n: u64 = digits.parse().map_err(|_| RetentionParseError)?;
+    if n == 0 {
+        return Err(RetentionParseError);
+    }
+    Ok(match unit {
+        'd' => RetentionPeriod::Days(n),
+        'h' => RetentionPeriod::Hours(n),
+        _ => return Err(RetentionParseError),
+    })
 }
 
 fn main() -> Result<()> {
@@ -182,6 +247,7 @@ fn main() -> Result<()> {
         cli.database_type,
         cli.encryption_type,
         cli.recipients,
+        cli.retention_period,
     )?;
     for d in &delivered {
         match d {
@@ -190,4 +256,43 @@ fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_retention_period_accepts_valid_forms() {
+        assert_eq!(
+            parse_retention_period("unlimited").unwrap(),
+            RetentionPeriod::Unlimited
+        );
+        assert_eq!(
+            parse_retention_period("7d").unwrap(),
+            RetentionPeriod::Days(7)
+        );
+        assert_eq!(
+            parse_retention_period("1h").unwrap(),
+            RetentionPeriod::Hours(1)
+        );
+        assert_eq!(
+            parse_retention_period("3650d").unwrap(),
+            RetentionPeriod::Days(3650)
+        );
+    }
+
+    #[test]
+    fn parse_retention_period_rejects_invalid_forms() {
+        // Zero is not a positive integer; the unit must be 'd' or 'h'; the
+        // number must be unsigned digits. Each of these must be rejected.
+        for bad in [
+            "0d", "0h", "0", "d", "h", "1x", "+1d", "-1d", "abc", "", "1.5d", "d1", "dh",
+        ] {
+            assert!(
+                parse_retention_period(bad).is_err(),
+                "{bad:?} must be rejected"
+            );
+        }
+    }
 }

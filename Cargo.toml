@@ -14,7 +14,7 @@ object_store = { version = "0.14", default-features = false, features = ["aws"] 
 rusqlite = { version = "0.32", features = ["bundled", "backup"] }
 tar = "0.4"
 tempfile = "3"
-time = { version = "0.3", features = ["formatting", "macros"] }
+time = { version = "0.3", features = ["formatting", "macros", "parsing"] }
 tokio = { version = "1", features = ["rt-multi-thread", "io-util", "fs"] }
 
 [dev-dependencies]

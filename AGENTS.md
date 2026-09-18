@@ -24,9 +24,12 @@ crate), optionally OpenPGP-encrypted via the system `gpg`.
 ## Layout
 
 - `src/main.rs` — `clap` CLI; the declared-type/value cross-checks happen
-  here before any work
+  here before any work; parses the required `--retention-period`
+  (`VWB_RETENTION_PERIOD`) into `RetentionPeriod`
 - `src/lib.rs` — `run()`: validate → preflight → db snapshot → archive →
-  encrypt → deliver; `stamp()` mints the second-precision UTC file name
+  encrypt → deliver → (on success only) retention cleanup; `stamp()` mints the
+  second-precision UTC file name; `archive_stamp()`/`should_delete()` are the
+  shared retention predicates
 - `src/db.rs` — `Connection::backup` (SQLite Online Backup), read-only open
   with a short busy retry
 - `src/archive.rs` — streams the snapshot + files straight into gzip (no
@@ -37,11 +40,13 @@ crate), optionally OpenPGP-encrypted via the system `gpg`.
   fingerprints, primary or subkey) + `gpg --encrypt` with compression off
   (input is already gzip)
 - `src/deliver.rs` — atomic per-target copy; targets are independent but any
-  failure fails the run, naming every failing target
+  failure fails the run, naming every failing target; also best-effort local
+  retention cleanup (`cleanup_retention`)
 - `src/s3.rs` — S3-compatible delivery (`object_store` + a shared lazily
   created tokio runtime behind a sync `block_on` wrapper): client build,
   head-based no-overwrite preflight, streaming multipart upload,
-  `join_prefix` key composition
+  `join_prefix` key composition, and best-effort S3 retention cleanup
+  (`cleanup_retention` over `list_with_delimiter` + `delete`)
 
 ## Conventions & gotchas
 

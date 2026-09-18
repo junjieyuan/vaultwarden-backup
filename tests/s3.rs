@@ -22,6 +22,7 @@ fn s3_cli_base(src: &Path, target: &Path) -> std::process::Command {
     cmd.arg("--name").arg("s3test");
     cmd.arg("--database-type").arg("sqlite");
     cmd.arg("--encryption-type").arg("none");
+    cmd.arg("--retention-period").arg("unlimited");
     cmd
 }
 
@@ -217,6 +218,7 @@ fn s3_target_e2e_upload_nooverwrite_and_unpack() {
         vaultwarden_backup::DatabaseType::Sqlite,
         vaultwarden_backup::EncryptionType::None,
         Vec::new(),
+        vaultwarden_backup::RetentionPeriod::Unlimited,
     )
     .unwrap();
     assert_eq!(delivered.len(), 1, "one delivery");
@@ -269,6 +271,7 @@ fn s3_target_e2e_upload_nooverwrite_and_unpack() {
             vaultwarden_backup::DatabaseType::Sqlite,
             vaultwarden_backup::EncryptionType::None,
             Vec::new(),
+            vaultwarden_backup::RetentionPeriod::Unlimited,
         );
         if err.is_err() {
             collided = true;
@@ -289,5 +292,111 @@ fn s3_target_e2e_upload_nooverwrite_and_unpack() {
             .iter()
             .all(|m| !m.location.to_string().contains(".part")),
         "no .part objects may remain"
+    );
+}
+
+// A 20-char UTC stamp well past any retention window, to seed an "expired"
+// own-archive object under the prefix.
+const EXPIRED_STAMP: &str = "2020-01-02T03:04:05Z";
+
+#[test]
+fn s3_retention_cleanup_deletes_expired() {
+    use object_store::aws::AmazonS3Builder;
+    use object_store::path::Path as ObjPath;
+    use object_store::{ObjectStore, ObjectStoreExt};
+
+    let Some((endpoint, ak, sk, bucket)) = s3_test_env() else {
+        eprintln!("skipping S3 e2e: set VWB_S3_TEST_ENDPOINT");
+        return;
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let src = make_sample_source(root);
+
+    let prefix = "ret";
+    let s3 = vaultwarden_backup::S3Target {
+        endpoint: endpoint.clone(),
+        region: "us-east-1".into(),
+        access_key: ak.clone(),
+        secret_key: sk.clone(),
+        bucket: bucket.clone(),
+        prefix: prefix.into(),
+        addressing: vaultwarden_backup::S3Addressing::PathStyle,
+    };
+    let client = AmazonS3Builder::new()
+        .with_region("us-east-1")
+        .with_access_key_id(&ak)
+        .with_secret_access_key(&sk)
+        .with_bucket_name(&bucket)
+        .with_endpoint(&endpoint)
+        .with_virtual_hosted_style_request(false)
+        .with_allow_http(endpoint.starts_with("http://"))
+        .build()
+        .unwrap();
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
+    // Seed one expired own archive, one fresh own archive (a future stamp),
+    // and one foreign old archive. Any stale objects from a crashed earlier
+    // run are removed so the assertions below are exact.
+    let expired_key = format!("{prefix}/arch-{EXPIRED_STAMP}.tgz");
+    let now = time::OffsetDateTime::now_utc();
+    let future_stamp = vaultwarden_backup::stamp(&(now + time::Duration::hours(2)));
+    let fresh_key = format!("{prefix}/arch-{future_stamp}.tgz");
+    let foreign_key = format!("{prefix}/other-{EXPIRED_STAMP}.tgz");
+    for key in [&expired_key, &fresh_key, &foreign_key] {
+        let _ = rt.block_on(client.delete(&ObjPath::from(key.as_str())));
+    }
+    rt.block_on(async {
+        for key in [&expired_key, &fresh_key, &foreign_key] {
+            client
+                .put(
+                    &ObjPath::from(key.as_str()),
+                    format!("seed {key}").into_bytes().into(),
+                )
+                .await
+                .unwrap();
+        }
+    });
+
+    let delivered = vaultwarden_backup::run(
+        src,
+        vec![vaultwarden_backup::Target::S3(s3.clone())],
+        "arch".into(),
+        vaultwarden_backup::DatabaseType::Sqlite,
+        vaultwarden_backup::EncryptionType::None,
+        Vec::new(),
+        vaultwarden_backup::RetentionPeriod::Days(7),
+    )
+    .unwrap();
+    assert_eq!(delivered.len(), 1, "one delivery");
+
+    // The expired own archive is cleaned up; the fresh own archive and the
+    // foreign one survive, and the run delivered its own archive.
+    let listing = rt
+        .block_on(client.list_with_delimiter(Some(&ObjPath::from(prefix))))
+        .unwrap();
+    let keys: Vec<String> = listing
+        .objects
+        .iter()
+        .map(|m| m.location.to_string())
+        .collect();
+    assert!(
+        !keys.contains(&expired_key),
+        "expired own archive must be deleted; keys: {keys:?}"
+    );
+    assert!(
+        keys.contains(&fresh_key),
+        "fresh own archive must survive; keys: {keys:?}"
+    );
+    assert!(
+        keys.contains(&foreign_key),
+        "foreign archive must survive; keys: {keys:?}"
+    );
+    assert!(
+        keys.iter().all(|k| !k.contains(".part")),
+        "no .part objects may remain; keys: {keys:?}"
     );
 }
