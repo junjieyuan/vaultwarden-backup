@@ -53,7 +53,7 @@ its environment variable; the command line wins.
 | `--local-source` | `VWB_LOCAL_SOURCE` | the vaultwarden data directory (contains `db.sqlite3`); a single directory — the source is always one |
 | `--target-type` | `VWB_TARGET_TYPE` | destination type(s): `local` and/or `s3` |
 | `--local-target` | `VWB_LOCAL_TARGET` | local target directory (created if missing); repeat or comma-separate (`A,B`) to deliver one copy to several local directories; the same physical directory given twice is delivered once |
-| `--s3-endpoint` | `VWB_S3_ENDPOINT` | S3-compatible endpoint URL, **required** with `--target-type s3`: self-hosted (RustFS, MinIO), S3-compatible clouds (Wasabi, Backblaze B2, Cloudflare R2) or AWS itself (`https://s3.<region>.amazonaws.com`) |
+| `--s3-endpoint` | `VWB_S3_ENDPOINT` | S3-compatible endpoint URL, **required** with `--target-type s3`: self-hosted (RustFS, MinIO), S3-compatible clouds (Wasabi, Backblaze B2, Cloudflare R2) or AWS itself (`https://s3.<region>.example.com`) |
 | `--s3-region` | `VWB_S3_REGION` | region used for signing, **required** with `--target-type s3`; passed through verbatim — Cloudflare R2 uses `auto` |
 | `--s3-access-key` | `VWB_S3_ACCESS_KEY` | S3 access key, **required** with `--target-type s3` |
 | `--s3-secret-key` | `VWB_S3_SECRET_KEY` | S3 secret key, **required** with `--target-type s3` |
@@ -110,7 +110,7 @@ vaultwarden-backup \
 # S3-compatible target (Cloudflare R2), encrypted (plaintext is never uploaded)
 vaultwarden-backup \
   --source-type local --local-source /srv/vaultwarden/data \
-  --target-type s3 --s3-endpoint https://<account_id>.r2.cloudflarestorage.com \
+  --target-type s3 --s3-endpoint https://<account_id>.r2.example.com \
   --s3-region auto --s3-access-key <R2_ACCESS_KEY> --s3-secret-key <R2_SECRET_KEY> \
   --s3-bucket my-backups --s3-prefix / --s3-addressing path-style \
   --name vaultwarden-backup --database-type sqlite --encryption-type openpgp \
@@ -120,7 +120,7 @@ vaultwarden-backup \
 # local AND S3 in one run (--target-type local,s3), environment only (cron / systemd)
 export VWB_SOURCE_TYPE=local VWB_LOCAL_SOURCE=/srv/vaultwarden/data
 export VWB_TARGET_TYPE=local,s3 VWB_LOCAL_TARGET=/backup
-export VWB_S3_ENDPOINT=https://s3.eu-central-1.wasabisys.com VWB_S3_REGION=eu-central-1
+export VWB_S3_ENDPOINT=https://s3.example.com VWB_S3_REGION=eu-central-1
 export VWB_S3_ACCESS_KEY=<KEY> VWB_S3_SECRET_KEY=<SECRET> VWB_S3_BUCKET=backups
 export VWB_S3_PREFIX=host-a VWB_S3_ADDRESSING=virtual-hosted
 export VWB_NAME=vaultwarden-backup VWB_DATABASE_TYPE=sqlite

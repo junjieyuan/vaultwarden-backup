@@ -94,7 +94,7 @@ pub enum S3Addressing {
 /// storage that was not declared).
 #[derive(Debug, Clone)]
 pub struct S3Target {
-    /// S3-compatible endpoint URL (AWS `https://s3.<region>.amazonaws.com`,
+    /// S3-compatible endpoint URL (AWS `https://s3.<region>.example.com`,
     /// RustFS, MinIO, Wasabi, Backblaze B2, Cloudflare R2, …).
     pub endpoint: String,
     /// Region used for SigV4 signing; passed through verbatim (R2 uses
