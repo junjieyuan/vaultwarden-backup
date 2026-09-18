@@ -47,7 +47,7 @@ struct Cli {
     /// S3-compatible endpoint URL (required with `--target-type s3`):
     /// self-hosted (RustFS, MinIO), S3-compatible clouds (Wasabi,
     /// Backblaze B2, Cloudflare R2) or AWS itself
-    /// (`https://s3.<region>.amazonaws.com`)
+    /// (`https://s3.<region>.example.com`)
     #[arg(long = "s3-endpoint", env = "VWB_S3_ENDPOINT")]
     s3_endpoint: Option<String>,
 
