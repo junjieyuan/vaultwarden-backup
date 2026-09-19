@@ -17,9 +17,9 @@ use tar::Builder;
 /// directory's contents directly at the archive root (no top-level
 /// directory).
 ///
-/// Skips `db_name` and its `{db_name}-*` sidecars (the database path owns the
-/// `db.sqlite3` entry), and skips symlinks, other special files, and empty
-/// directories with a warning on stderr.
+/// Skips `db_name` and its `-wal`/`-shm` sidecars at the source root (the
+/// database path owns the `db.sqlite3` entry), and skips symlinks, other
+/// special files, and empty directories with a warning on stderr.
 ///
 /// Traversal is iterative (an explicit entry stack): expanding a directory
 /// pushes its children onto the stack in reverse name order so `pop()`
@@ -110,9 +110,17 @@ fn push_children(
             .context("entry has no file name")?
             .to_string_lossy()
             .to_string();
-        // Only the source root's own database and sidecars are skipped:
-        // deeper files with the same name are ordinary files and archived.
-        if arc_root.is_empty() && (name == db_name || name.starts_with(&format!("{db_name}-"))) {
+        // Only the source root's own database and its two SQLite sidecars
+        // (`-wal`, `-shm`) are skipped: the online snapshot already carries
+        // the WAL contents, so a stale sidecar would be inconsistent with
+        // it. Any other `db.sqlite3-*` file at the root is an ordinary file
+        // and is archived; deeper files with the same name are ordinary
+        // files too.
+        if arc_root.is_empty()
+            && (name == db_name
+                || name == format!("{db_name}-wal")
+                || name == format!("{db_name}-shm"))
+        {
             continue;
         }
         let arc_name = if arc_root.is_empty() {
@@ -175,6 +183,10 @@ mod tests {
         fs::write(d.join("db.sqlite3"), b"rawdb").unwrap();
         fs::write(d.join("db.sqlite3-wal"), b"wal").unwrap();
         fs::write(d.join("db.sqlite3-shm"), b"shm").unwrap();
+        // A root-level file that merely starts with the db name is not a
+        // sidecar (only `-wal`/`-shm` are): it is an ordinary file and must
+        // be archived, not silently dropped.
+        fs::write(d.join("db.sqlite3-notes"), b"notes").unwrap();
         let sub = d.join("sub");
         fs::create_dir(&sub).unwrap();
         fs::write(sub.join("c.txt"), b"cc").unwrap();
@@ -192,7 +204,13 @@ mod tests {
         let names = entry_names(d);
         assert_eq!(
             names,
-            vec!["a.txt", "b.txt", "sub/c.txt", "sub/db.sqlite3"],
+            vec![
+                "a.txt",
+                "b.txt",
+                "db.sqlite3-notes",
+                "sub/c.txt",
+                "sub/db.sqlite3"
+            ],
             "archive root is the data directory itself (no top-level dir)"
         );
         let _ = empty; // kept on disk so the walk visits (and warns about) it
