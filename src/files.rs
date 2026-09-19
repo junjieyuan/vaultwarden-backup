@@ -135,7 +135,7 @@ fn file_changed(before: &fs::Metadata, after: &fs::Metadata) -> bool {
 
 /// Modification time of `meta` as seconds since the epoch (1970-01-01 when
 /// the timestamp predates it).
-fn mtime_of(meta: &fs::Metadata, path: &Path) -> Result<u64> {
+pub(crate) fn mtime_of(meta: &fs::Metadata, path: &Path) -> Result<u64> {
     let modified = meta
         .modified()
         .with_context(|| format!("read mtime of {}", path.display()))?;
