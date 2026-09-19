@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use tar::Builder;
 
 /// Stream every regular file under `src` into `builder`, with the data
@@ -67,8 +67,10 @@ pub fn write<W: std::io::Write>(builder: &mut Builder<W>, src: &Path, db_name: &
             let mut header = tar::Header::new_ustar();
             header.set_size(opened.len());
             header.set_mode(opened.permissions().mode() & 0o7777);
-            header.set_uid(0);
-            header.set_gid(0);
+            // Ownership is recorded like tar/rsync, so a root restore
+            // reproduces the data directory's exact uid/gid.
+            header.set_uid(u64::from(opened.uid()));
+            header.set_gid(u64::from(opened.gid()));
             header.set_mtime(mtime_of(&opened, &path)?);
             builder
                 .append_data(&mut header, &arc_name, &mut file)
@@ -217,14 +219,14 @@ mod tests {
     }
 
     #[test]
-    fn preserves_mode_and_mtime() {
+    fn preserves_mode_ownership_and_mtime() {
         let dir = tempfile::tempdir().unwrap();
         let d = dir.path();
         let f = d.join("f.txt");
         fs::write(&f, b"x").unwrap();
         fs::set_permissions(&f, fs::Permissions::from_mode(0o600)).unwrap();
-        let want_mtime = fs::metadata(&f)
-            .unwrap()
+        let fmeta = fs::metadata(&f).unwrap();
+        let want_mtime = fmeta
             .modified()
             .unwrap()
             .duration_since(UNIX_EPOCH)
@@ -242,6 +244,10 @@ mod tests {
 
         assert_eq!(entry.path().unwrap().to_string_lossy(), "f.txt");
         assert_eq!(entry.header().mode().unwrap(), 0o600);
+        // uid/gid ride along like tar/rsync: a root restore then reproduces
+        // the source file's exact ownership.
+        assert_eq!(entry.header().uid().unwrap(), u64::from(fmeta.uid()));
+        assert_eq!(entry.header().gid().unwrap(), u64::from(fmeta.gid()));
         assert_eq!(entry.header().mtime().unwrap(), want_mtime);
     }
 

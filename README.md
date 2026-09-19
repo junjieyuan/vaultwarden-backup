@@ -14,7 +14,8 @@ The archive is safe to upload and safe to restore:
   sidecars. Anything written to the source after the snapshot is not in the
   archive.
 - Every other file (`attachments/`, `sends/`, `config.json`, `rsa_key*`,
-  `icon_cache/`, …) is copied byte-exact, permissions and mtime included.
+  `icon_cache/`, …) is copied byte-exact, permissions, ownership and mtime
+  included.
   Symlinks, special files, and empty directories are skipped with a warning
   on stderr. If a file is rewritten while being copied (vaultwarden
   refreshes `icon_cache/` or `config.json` while running), the run **fails

@@ -9,6 +9,7 @@
 //! finished archive to the targets itself.
 
 use std::fs;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -31,8 +32,9 @@ pub fn create(
     let final_path = workdir.join(archive_name);
 
     let result = (|| {
-        // The snapshot's metadata is needed twice (size for the header, mtime
-        // so the restored db.sqlite3 carries its backup time), so stat once.
+        // The snapshot is stat'ed once: its size, ownership and mtime all
+        // feed the entry's header (the mtime so a restored db.sqlite3 keeps
+        // its backup time).
         let snap_meta = fs::metadata(snapshot)
             .with_context(|| format!("stat snapshot {}", snapshot.display()))?;
         let snap_len = snap_meta.len();
@@ -51,8 +53,10 @@ pub fn create(
             let mut header = tar::Header::new_ustar();
             header.set_size(snap_len);
             header.set_mode(0o644);
-            header.set_uid(0);
-            header.set_gid(0);
+            // Same ownership convention as the file entries: the snapshot's
+            // uid/gid are recorded so a root restore reproduces them.
+            header.set_uid(u64::from(snap_meta.uid()));
+            header.set_gid(u64::from(snap_meta.gid()));
             header.set_mtime(files::mtime_of(&snap_meta, snapshot)?);
             builder
                 .append_data(&mut header, DB_FILENAME, &mut snap_file)
@@ -116,6 +120,11 @@ mod tests {
         let mut entries = archive.entries().unwrap();
         let mut entry = entries.next().unwrap().unwrap();
         assert_eq!(entry.path().unwrap().to_string_lossy(), "db.sqlite3");
+        // The header reflects the snapshot file's own metadata: ownership and
+        // mtime are recorded, not zeroed.
+        let snap_meta = fs::metadata(&snap).unwrap();
+        assert_eq!(entry.header().uid().unwrap(), u64::from(snap_meta.uid()));
+        assert_eq!(entry.header().gid().unwrap(), u64::from(snap_meta.gid()));
         assert_eq!(entry.header().mtime().unwrap(), want);
         // The payload is intact under the preserved header.
         let mut buf = Vec::new();
