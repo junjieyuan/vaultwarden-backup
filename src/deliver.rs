@@ -3,6 +3,7 @@
 //! archive that already exists. S3-compatible delivery lives in `s3.rs`.
 
 use std::fs;
+use std::mem::DropGuard;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -82,38 +83,36 @@ pub(crate) fn ensure_targets_free(targets: &[PathBuf], file_name: &str) -> Resul
 /// never shows a partial file and a stale `.part` from a crashed run is
 /// overwritten, not mixed.
 fn deliver_one(final_path: &Path, part: &Path, dest: &Path) -> Result<()> {
-    let result = (|| {
-        fs::copy(final_path, part)
-            .with_context(|| format!("copy artifact to {}", part.display()))?;
-        // Make sure the copy is on disk before it becomes visible under the
-        // final name; otherwise a crash right after the rename could leave
-        // an empty or partial file under the target's name.
-        fs::File::open(part)
-            .and_then(|f| f.sync_all())
-            .with_context(|| format!("fsync {}", part.display()))?;
-        fs::rename(part, dest)
-            .with_context(|| format!("rename {} -> {}", part.display(), dest.display()))?;
-        // Persist the directory entry created by the rename. Some file
-        // systems (FUSE mounts, some network/NAS file systems, tmpfs)
-        // return EINVAL or ENOTSUP for a directory fsync; the archive
-        // itself is already durable, so degrade to a warning instead of
-        // failing the target on data that is already in place.
-        if let Some(dir) = dest.parent()
-            && let Err(e) = fs::File::open(dir).and_then(|d| d.sync_all())
-        {
-            eprintln!(
-                "warning: could not fsync target directory {} ({e}); \
-                 the archive itself was already fsynced",
-                dir.display()
-            );
-        }
-        Ok(())
-    })();
-    if result.is_err() {
-        // Never leave a partial file under the target's name.
-        let _ = fs::remove_file(part);
+    // The guard removes the half-written part on every exit path (including
+    // `?` and panic); on success the rename already took it.
+    let part = DropGuard::new(part.to_path_buf(), |part| {
+        let _ = fs::remove_file(&part);
+    });
+
+    fs::copy(final_path, &*part).with_context(|| format!("copy artifact to {}", part.display()))?;
+    // Make sure the copy is on disk before it becomes visible under the
+    // final name; otherwise a crash right after the rename could leave
+    // an empty or partial file under the target's name.
+    fs::File::open(&*part)
+        .and_then(|f| f.sync_all())
+        .with_context(|| format!("fsync {}", part.display()))?;
+    fs::rename(&*part, dest)
+        .with_context(|| format!("rename {} -> {}", part.display(), dest.display()))?;
+    // Persist the directory entry created by the rename. Some file
+    // systems (FUSE mounts, some network/NAS file systems, tmpfs)
+    // return EINVAL or ENOTSUP for a directory fsync; the archive
+    // itself is already durable, so degrade to a warning instead of
+    // failing the target on data that is already in place.
+    if let Some(dir) = dest.parent()
+        && let Err(e) = fs::File::open(dir).and_then(|d| d.sync_all())
+    {
+        eprintln!(
+            "warning: could not fsync target directory {} ({e}); \
+             the archive itself was already fsynced",
+            dir.display()
+        );
     }
-    result
+    Ok(())
 }
 
 /// Best-effort retention cleanup for one local target: delete this run's own

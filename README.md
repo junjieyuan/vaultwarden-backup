@@ -272,7 +272,7 @@ at parse time, naming the flag.
 
 ## Build & test
 
-Requires Rust **1.98 or newer** (enforced via `rust-version` in
+Requires Rust **1.100 or newer** (enforced via `rust-version` in
 `Cargo.toml`). A [`rust-toolchain.toml`](rust-toolchain.toml) pins the
 toolchain (with `clippy`/`rustfmt` components) for rustup users — clone and
 `cargo build` just works, in CI too.

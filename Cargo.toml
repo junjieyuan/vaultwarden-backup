@@ -2,7 +2,7 @@
 name = "vaultwarden-backup"
 version = "0.4.0"
 edition = "2024"
-rust-version = "1.98"
+rust-version = "1.100"
 description = "Backup a vaultwarden data directory to a timestamped .tgz (SQLite online backup + file tar)"
 license = "MIT"
 
@@ -38,6 +38,10 @@ all = "deny"
 # (cfg_attr(test, allow(..))) and tests/integration.rs.
 unwrap_used = "deny"
 expect_used = "deny"
+
+[lints.cargo]
+# Unused [dependencies] entries are build errors, not drift.
+unused_dependencies = "deny"
 
 [profile.release]
 strip = true

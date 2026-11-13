@@ -9,6 +9,7 @@
 //! finished archive to the targets itself.
 
 use std::fs;
+use std::mem::DropGuard;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
@@ -28,63 +29,60 @@ pub fn create(
     snapshot: &Path,
     source: &Path,
 ) -> Result<PathBuf> {
-    let part = workdir.join(format!("{archive_name}.part"));
     let final_path = workdir.join(archive_name);
-
-    let result = (|| {
-        // The snapshot is stat'ed once: its size, ownership and mtime all
-        // feed the entry's header (the mtime so a restored db.sqlite3 keeps
-        // its backup time).
-        let snap_meta = fs::metadata(snapshot)
-            .with_context(|| format!("stat snapshot {}", snapshot.display()))?;
-        let snap_len = snap_meta.len();
-
-        let part_file =
-            fs::File::create(&part).with_context(|| format!("create {}", part.display()))?;
-        let encoder = GzEncoder::new(part_file, Compression::new(6));
-        let mut builder = Builder::new(encoder);
-
-        // The `db.sqlite3` entry is the snapshot, so the archive is consistent
-        // on its own; the data directory's contents sit directly at the archive
-        // root.
-        {
-            let mut snap_file = fs::File::open(snapshot)
-                .with_context(|| format!("open snapshot {}", snapshot.display()))?;
-            let mut header = tar::Header::new_ustar();
-            header.set_size(snap_len);
-            header.set_mode(0o644);
-            // Same ownership convention as the file entries: the snapshot's
-            // uid/gid are recorded so a root restore reproduces them.
-            header.set_uid(u64::from(snap_meta.uid()));
-            header.set_gid(u64::from(snap_meta.gid()));
-            header.set_mtime(files::mtime_of(&snap_meta, snapshot)?);
-            builder
-                .append_data(&mut header, DB_FILENAME, &mut snap_file)
-                .with_context(|| format!("append {DB_FILENAME} to archive"))?;
-        }
-
-        files::write(&mut builder, source, DB_FILENAME)?;
-
-        // Close the tar stream first (writes the end-of-archive block), then the
-        // gzip trailer.
-        let encoder = builder
-            .into_inner()
-            .with_context(|| "finalize tar stream")?;
-        encoder
-            .finish()
-            .with_context(|| format!("write gzip trailer to {}", part.display()))?;
-
-        // Atomic publish: the final name appears only once fully written.
-        fs::rename(&part, &final_path)
-            .with_context(|| format!("rename {} -> {}", part.display(), final_path.display()))?;
-
-        Ok(final_path)
-    })();
-    if result.is_err() {
-        // Never leave a half-written artifact under the final name's parent.
+    // The guard removes the half-written part on every exit path (including
+    // `?` and panic); on success the rename already took it.
+    let part = DropGuard::new(workdir.join(format!("{archive_name}.part")), |part| {
         let _ = fs::remove_file(&part);
+    });
+
+    // The snapshot is stat'ed once: its size, ownership and mtime all
+    // feed the entry's header (the mtime so a restored db.sqlite3 keeps
+    // its backup time).
+    let snap_meta =
+        fs::metadata(snapshot).with_context(|| format!("stat snapshot {}", snapshot.display()))?;
+    let snap_len = snap_meta.len();
+
+    let part_file =
+        fs::File::create(&*part).with_context(|| format!("create {}", part.display()))?;
+    let encoder = GzEncoder::new(part_file, Compression::new(6));
+    let mut builder = Builder::new(encoder);
+
+    // The `db.sqlite3` entry is the snapshot, so the archive is consistent
+    // on its own; the data directory's contents sit directly at the archive
+    // root.
+    {
+        let mut snap_file = fs::File::open(snapshot)
+            .with_context(|| format!("open snapshot {}", snapshot.display()))?;
+        let mut header = tar::Header::new_ustar();
+        header.set_size(snap_len);
+        header.set_mode(0o644);
+        // Same ownership convention as the file entries: the snapshot's
+        // uid/gid are recorded so a root restore reproduces them.
+        header.set_uid(u64::from(snap_meta.uid()));
+        header.set_gid(u64::from(snap_meta.gid()));
+        header.set_mtime(files::mtime_of(&snap_meta, snapshot)?);
+        builder
+            .append_data(&mut header, DB_FILENAME, &mut snap_file)
+            .with_context(|| format!("append {DB_FILENAME} to archive"))?;
     }
-    result
+
+    files::write(&mut builder, source, DB_FILENAME)?;
+
+    // Close the tar stream first (writes the end-of-archive block), then the
+    // gzip trailer.
+    let encoder = builder
+        .into_inner()
+        .with_context(|| "finalize tar stream")?;
+    encoder
+        .finish()
+        .with_context(|| format!("write gzip trailer to {}", part.display()))?;
+
+    // Atomic publish: the final name appears only once fully written.
+    fs::rename(&*part, &final_path)
+        .with_context(|| format!("rename {} -> {}", part.display(), final_path.display()))?;
+
+    Ok(final_path)
 }
 
 #[cfg(test)]

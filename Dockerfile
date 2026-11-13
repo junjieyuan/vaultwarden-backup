@@ -1,5 +1,5 @@
 # Build needs a C compiler (rusqlite bundled SQLite); the default rust image has one.
-FROM docker.io/library/rust:1.98-trixie@sha256:bf5a9aa29062a6cb03c49bd59a46eb55e3cc770caf598a221a7866e500be3082 AS build
+FROM docker.io/library/rust:1.100.0-trixie@sha256:e19840879045c951c905d0eaa9887f3439c62000e429963371b376bac8d38c31 AS build
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
