@@ -23,3 +23,12 @@ repos:
         language: system
         pass_filenames: false
         files: '\.rs$'
+      # Manifest-only commits (version bumps) skip the .rs hooks above, so
+      # a stale Cargo.lock would reach the release builds. Any cargo command
+      # re-syncs the lock.
+      - id: cargo-lock-consistency
+        name: cargo manifest/lock consistency (--locked)
+        entry: cargo metadata --locked --format-version 1
+        language: system
+        pass_filenames: false
+        files: 'Cargo\.(toml|lock)$'
