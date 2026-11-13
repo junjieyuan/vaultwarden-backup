@@ -59,7 +59,9 @@ jobs:
       - name: Check formatting
         run: cargo fmt --check
       - name: Lint
-        run: cargo clippy --all-targets --all-features
+        # --locked: a stale Cargo.lock must fail here instead of being
+        # silently rewritten (a rewrite would mask it for the steps below).
+        run: cargo clippy --all-targets --all-features --locked
       - name: Test
         env:
           VWB_S3_TEST_ENDPOINT: http://127.0.0.1:9000
