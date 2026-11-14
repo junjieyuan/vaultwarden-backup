@@ -11,11 +11,18 @@ anyhow = "1"
 clap = { version = "4", features = ["derive", "env"] }
 flate2 = "1"
 object_store = { version = "0.14", default-features = false, features = ["aws"] }
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "rustls", "http2"] }
 rusqlite = { version = "0.32", features = ["bundled", "backup"] }
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
+semver = "1"
 tar = "0.4"
 tempfile = "3"
 time = { version = "0.3", features = ["formatting", "macros", "parsing"] }
 tokio = { version = "1", features = ["rt-multi-thread", "io-util", "fs"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 # Integration tests are a separate crate: they link the library plus these,
