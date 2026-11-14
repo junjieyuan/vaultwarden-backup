@@ -21,6 +21,7 @@ pub mod db;
 pub mod deliver;
 pub mod files;
 pub mod s3;
+pub mod update;
 
 use std::collections::HashSet;
 use std::fs;

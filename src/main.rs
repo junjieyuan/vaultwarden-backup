@@ -13,6 +13,7 @@ use vwb::{
 #[derive(Parser, Debug)]
 #[command(
     version,
+    propagate_version = true,
     about = "Back up a vaultwarden data directory to a .tgz archive"
 )]
 struct Cli {
@@ -21,6 +22,9 @@ struct Cli {
 }
 
 #[derive(Subcommand, Debug)]
+// `Backup` must hold the large options struct directly; clap's derive
+// cannot box it.
+#[allow(clippy::large_enum_variant)]
 enum Command {
     /// Back up a vaultwarden data directory to a timestamped .tgz archive,
     /// delivered to every local and/or S3-compatible target.
@@ -30,6 +34,9 @@ enum Command {
     /// corresponding value flag, and a value flag without its declared type
     /// is an error.
     Backup(Backup),
+
+    /// Update to the latest stable GitHub release
+    Update(UpdateCmd),
 }
 
 /// Options of one backup run (every option lives on the `backup`
@@ -128,6 +135,14 @@ struct Backup {
     retention_period: RetentionPeriod,
 }
 
+/// Arguments of the `update` subcommand.
+#[derive(clap::Args, Debug)]
+struct UpdateCmd {
+    /// Only report whether a newer stable release exists; install nothing
+    #[arg(long)]
+    check: bool,
+}
+
 /// Source types.
 #[derive(Debug, Clone, Copy, PartialEq, clap::ValueEnum)]
 enum SourceType {
@@ -194,6 +209,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Backup(backup) => run_backup(backup),
+        Command::Update(update) => run_update(update),
     }
 }
 
@@ -283,6 +299,29 @@ fn run_backup(backup: Backup) -> Result<()> {
             Delivered::Local(path) => println!("{}", path.display()),
             Delivered::S3 { bucket, key } => println!("s3://{bucket}/{key}"),
         }
+    }
+    Ok(())
+}
+
+/// The `update` subcommand: report or install the latest stable GitHub
+/// release.
+fn run_update(update: UpdateCmd) -> Result<()> {
+    let report = vwb::update::run(update.check)?;
+    let current = format!("v{}", env!("CARGO_PKG_VERSION"));
+    if report.updated {
+        // `report.exe` was resolved before the replacement; resolving it
+        // again here would return the unlinked old inode ("... (deleted)").
+        println!(
+            "updated {}: {current} -> {}",
+            report.exe.display(),
+            report.latest
+        );
+    } else if report.update_available {
+        println!("update available: {} (current {current})", report.latest);
+    } else if update.check {
+        println!("up to date ({current})");
+    } else {
+        println!("already up to date ({current})");
     }
     Ok(())
 }

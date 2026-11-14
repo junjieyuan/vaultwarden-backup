@@ -26,7 +26,8 @@ crate), optionally OpenPGP-encrypted via the system `gpg`.
 - `src/main.rs` — `clap` CLI: a single `backup` subcommand holds every
   option; the declared-type/value cross-checks happen here before any work;
   parses the required `--retention-period` (`VWB_RETENTION_PERIOD`) into
-  `RetentionPeriod`
+  `RetentionPeriod`; the sibling `update` subcommand dispatches the
+  self-update
 - `src/lib.rs` — `run()`: validate → preflight → db snapshot → archive →
   encrypt → deliver → (on success only) retention cleanup; `stamp()` mints the
   second-precision UTC file name; `archive_stamp()`/`should_delete()` are the
@@ -48,6 +49,12 @@ crate), optionally OpenPGP-encrypted via the system `gpg`.
   head-based no-overwrite preflight, streaming multipart upload,
   `join_prefix` key composition, and best-effort S3 retention cleanup
   (`cleanup_retention` over `list_with_delimiter` + `delete`)
+- `src/update.rs` — GitHub-release self-update: only the latest stable
+  release (a newer prerelease is refused), the compile-time target selects
+  the asset, and the API-reported SHA-256 digest is verified before an
+  atomic replace; the download and decompressed tarball are capped at
+  100/256 MiB, installs are serialized per cache directory by
+  `update.lock`, and killed-run scratch files are swept
 
 ## Conventions & gotchas
 
@@ -71,8 +78,9 @@ crate), optionally OpenPGP-encrypted via the system `gpg`.
 - Comments are "why", not "what" — do not restate code.
 - Tests: unit tests live in each `src/*.rs` module; end-to-end and
   real-binary CLI tests in `tests/` — `core.rs` (library-level), `cli.rs`
-  (binary CLI + OpenPGP), `s3.rs` (offline cross-checks + gated e2e), with
-  shared fixtures in `tests/common/mod.rs`.
+  (binary CLI + OpenPGP), `s3.rs` (offline cross-checks + gated e2e),
+  `update.rs` (offline fake-release HTTP server + gated real-GitHub
+  `--check`), with shared fixtures in `tests/common/mod.rs`.
 - Commit messages follow **Conventional Commits**:
   `type(optional scope): imperative subject` — e.g. `feat:`, `fix:`,
   `docs:`, `ci:`; use a scope only when it adds context, e.g.

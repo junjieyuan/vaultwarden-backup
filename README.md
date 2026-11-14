@@ -137,6 +137,38 @@ vwb backup
 0 3 * * * VWB_SOURCE_TYPE=local VWB_LOCAL_SOURCE=/srv/vaultwarden/data VWB_TARGET_TYPE=local VWB_LOCAL_TARGET=/backup VWB_NAME=vaultwarden-backup VWB_DATABASE_TYPE=sqlite VWB_ENCRYPTION_TYPE=openpgp VWB_RECIPIENTS=<FINGERPRINT> VWB_RETENTION_PERIOD=14d /usr/local/bin/vwb backup >> /var/log/vwb-backup.log 2>&1
 ```
 
+## Update
+
+Self-update from this repository's GitHub Releases:
+
+```
+vwb update --check   # report only; install nothing
+vwb update           # install the latest stable release
+```
+
+`update` downloads the release asset for the running binary's compile-time
+target (one of the four Linux release targets) into
+`$XDG_CACHE_HOME/vwb/update/` when that variable is absolute, otherwise
+`$HOME/.cache/vwb/update/`; it verifies the API-reported SHA-256 digest and
+atomically replaces the executable — a running process keeps the old
+version until the next start. The release also publishes a `.sha256` file
+for manual verification. The download is capped at 100 MiB and the
+decompressed tarball at 256 MiB.
+
+Only newer *stable* releases are installed: a semver prerelease is refused
+even if GitHub reports it as latest, and an update never downgrades. The
+executable's directory must be writable.
+
+Exactly one install per cache directory runs at a time: a second process
+using the same cache fails immediately, naming the holder. The `update.lock`
+`flock` is kernel-held and released on process death — even `SIGKILL` — so
+a killed update cannot wedge the next one. Installs within one process are
+serialized too.
+
+Leftover scratch from a killed run is removed on the next install; after a
+successful update, only the `update.lock` marker remains in the cache
+directory.
+
 ## S3-compatible object storage targets
 
 `--target-type s3` streams the finished archive (`<name>-<timestamp>.tgz`, or
