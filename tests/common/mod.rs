@@ -122,3 +122,11 @@ pub fn list_fprs(gnupg_home: &Path) -> Vec<String> {
 pub fn bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_vwb"))
 }
+
+/// A `Command` for the built binary with the `backup` subcommand already
+/// supplied: every option lives under that subcommand.
+pub fn backup_cmd() -> std::process::Command {
+    let mut cmd = std::process::Command::new(bin());
+    cmd.arg("backup");
+    cmd
+}

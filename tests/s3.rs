@@ -1,7 +1,8 @@
-//! S3-target tests: the CLI cross-checks run offline, the end-to-end tests
-//! need a real S3-compatible server and skip when `VWB_S3_TEST_ENDPOINT` is
-//! not set (a plain `cargo test` stays offline). CI provisions a RustFS
-//! service container and its bucket with the `rc` CLI.
+//! S3-target tests: the `backup` subcommand's cross-checks run offline, the
+//! end-to-end tests need a real S3-compatible server and skip when
+//! `VWB_S3_TEST_ENDPOINT` is not set (a plain `cargo test` stays offline).
+//! CI provisions a RustFS service container and its bucket with the `rc`
+//! CLI.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -9,12 +10,12 @@ mod common;
 
 use std::path::Path;
 
-use common::{bin, make_sample_source};
+use common::make_sample_source;
 
-/// A ready `Command` for a run with a local source and a local target, minus
-/// any target-type/flags — S3 tests add them below.
+/// A ready `backup` subcommand for a run with a local source and a local
+/// target, minus any target-type/flags — S3 tests add them below.
 fn s3_cli_base(src: &Path, target: &Path) -> std::process::Command {
-    let mut cmd = std::process::Command::new(bin());
+    let mut cmd = common::backup_cmd();
     cmd.arg("--source-type").arg("local");
     cmd.arg("--local-source").arg(src);
     cmd.arg("--target-type").arg("local");

@@ -3,23 +3,39 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use vwb::{
     DatabaseType, Delivered, EncryptionType, RetentionPeriod, S3Addressing, S3Target, Target,
 };
 
 /// Back up a vaultwarden data directory to a timestamped .tgz archive,
 /// delivered to every local and/or S3-compatible target.
-///
-/// Declared types (`--source-type`, `--target-type`) are cross-checked with
-/// the value flags: a declared type needs at least one corresponding value
-/// flag, and a value flag without its declared type is an error.
 #[derive(Parser, Debug)]
 #[command(
     version,
     about = "Back up a vaultwarden data directory to a .tgz archive"
 )]
 struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Back up a vaultwarden data directory to a timestamped .tgz archive,
+    /// delivered to every local and/or S3-compatible target.
+    ///
+    /// Declared types (`--source-type`, `--target-type`) are cross-checked
+    /// with the value flags: a declared type needs at least one
+    /// corresponding value flag, and a value flag without its declared type
+    /// is an error.
+    Backup(Backup),
+}
+
+/// Options of one backup run (every option lives on the `backup`
+/// subcommand).
+#[derive(Parser, Debug)]
+struct Backup {
     /// Source type (possible value: local)
     #[arg(long, required = true, env = "VWB_SOURCE_TYPE")]
     source_type: SourceType,
@@ -176,42 +192,49 @@ fn parse_retention_period(value: &str) -> Result<RetentionPeriod, RetentionParse
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    match cli.command {
+        Command::Backup(backup) => run_backup(backup),
+    }
+}
 
-    let source_type_local = cli.source_type == SourceType::Local;
-    let target_type_local = cli.target_types.contains(&TargetType::Local);
-    let target_type_s3 = cli.target_types.contains(&TargetType::S3);
-    let s3_flags_given = cli.s3_endpoint.is_some()
-        || cli.s3_region.is_some()
-        || cli.s3_access_key.is_some()
-        || cli.s3_secret_key.is_some()
-        || cli.s3_bucket.is_some()
-        || cli.s3_prefix.is_some()
-        || cli.s3_addressing.is_some();
+/// The `backup` subcommand: cross-check the declared types against the value
+/// flags before any work, then run the backup.
+fn run_backup(backup: Backup) -> Result<()> {
+    let source_type_local = backup.source_type == SourceType::Local;
+    let target_type_local = backup.target_types.contains(&TargetType::Local);
+    let target_type_s3 = backup.target_types.contains(&TargetType::S3);
+    let s3_flags_given = backup.s3_endpoint.is_some()
+        || backup.s3_region.is_some()
+        || backup.s3_access_key.is_some()
+        || backup.s3_secret_key.is_some()
+        || backup.s3_bucket.is_some()
+        || backup.s3_prefix.is_some()
+        || backup.s3_addressing.is_some();
 
     // A declared type requires its value flag, and a value flag requires its
     // declared type — checked before any work. S3 parameters are entirely
     // explicit: nothing about the destination may be silently defaulted.
-    if source_type_local && cli.local_source.is_none() {
+    if source_type_local && backup.local_source.is_none() {
         bail!("--source-type local requires --local-source");
     }
-    if !source_type_local && cli.local_source.is_some() {
+    if !source_type_local && backup.local_source.is_some() {
         bail!("--local-source given but --source-type local is not declared");
     }
-    if target_type_local && cli.local_targets.is_empty() {
+    if target_type_local && backup.local_targets.is_empty() {
         bail!("--target-type local requires at least one --local-target");
     }
-    if !target_type_local && !cli.local_targets.is_empty() {
+    if !target_type_local && !backup.local_targets.is_empty() {
         bail!("--local-target given but --target-type local is not declared");
     }
     if target_type_s3 {
         for (flag, present) in [
-            ("--s3-endpoint", cli.s3_endpoint.is_some()),
-            ("--s3-region", cli.s3_region.is_some()),
-            ("--s3-access-key", cli.s3_access_key.is_some()),
-            ("--s3-secret-key", cli.s3_secret_key.is_some()),
-            ("--s3-bucket", cli.s3_bucket.is_some()),
-            ("--s3-prefix", cli.s3_prefix.is_some()),
-            ("--s3-addressing", cli.s3_addressing.is_some()),
+            ("--s3-endpoint", backup.s3_endpoint.is_some()),
+            ("--s3-region", backup.s3_region.is_some()),
+            ("--s3-access-key", backup.s3_access_key.is_some()),
+            ("--s3-secret-key", backup.s3_secret_key.is_some()),
+            ("--s3-bucket", backup.s3_bucket.is_some()),
+            ("--s3-prefix", backup.s3_prefix.is_some()),
+            ("--s3-addressing", backup.s3_addressing.is_some()),
         ] {
             if !present {
                 bail!("--target-type s3 requires {flag}");
@@ -222,32 +245,38 @@ fn main() -> Result<()> {
         bail!("--s3-* flags given but --target-type s3 is not declared");
     }
 
-    let source: PathBuf = cli.local_source.context("local source is required")?;
-    let mut targets: Vec<Target> = cli
+    let source: PathBuf = backup.local_source.context("local source is required")?;
+    let mut targets: Vec<Target> = backup
         .local_targets
         .into_iter()
         .map(|dir| Target::Local { dir })
         .collect();
     if target_type_s3 {
         targets.push(Target::S3(S3Target {
-            endpoint: cli.s3_endpoint.context("--s3-endpoint is required")?,
-            region: cli.s3_region.context("--s3-region is required")?,
-            access_key: cli.s3_access_key.context("--s3-access-key is required")?,
-            secret_key: cli.s3_secret_key.context("--s3-secret-key is required")?,
-            bucket: cli.s3_bucket.context("--s3-bucket is required")?,
-            prefix: cli.s3_prefix.context("--s3-prefix is required")?,
-            addressing: cli.s3_addressing.context("--s3-addressing is required")?,
+            endpoint: backup.s3_endpoint.context("--s3-endpoint is required")?,
+            region: backup.s3_region.context("--s3-region is required")?,
+            access_key: backup
+                .s3_access_key
+                .context("--s3-access-key is required")?,
+            secret_key: backup
+                .s3_secret_key
+                .context("--s3-secret-key is required")?,
+            bucket: backup.s3_bucket.context("--s3-bucket is required")?,
+            prefix: backup.s3_prefix.context("--s3-prefix is required")?,
+            addressing: backup
+                .s3_addressing
+                .context("--s3-addressing is required")?,
         }));
     }
 
     let delivered = vwb::run(
         source,
         targets,
-        cli.name,
-        cli.database_type,
-        cli.encryption_type,
-        cli.recipients,
-        cli.retention_period,
+        backup.name,
+        backup.database_type,
+        backup.encryption_type,
+        backup.recipients,
+        backup.retention_period,
     )?;
     for d in &delivered {
         match d {
