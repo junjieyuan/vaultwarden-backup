@@ -11,4 +11,4 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates gnupg \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /build/target/release/vwb /usr/local/bin/vwb
-ENTRYPOINT ["vwb"]
+ENTRYPOINT ["vwb", "backup"]

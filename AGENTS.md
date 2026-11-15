@@ -23,9 +23,10 @@ crate), optionally OpenPGP-encrypted via the system `gpg`.
 
 ## Layout
 
-- `src/main.rs` — `clap` CLI; the declared-type/value cross-checks happen
-  here before any work; parses the required `--retention-period`
-  (`VWB_RETENTION_PERIOD`) into `RetentionPeriod`
+- `src/main.rs` — `clap` CLI: a single `backup` subcommand holds every
+  option; the declared-type/value cross-checks happen here before any work;
+  parses the required `--retention-period` (`VWB_RETENTION_PERIOD`) into
+  `RetentionPeriod`
 - `src/lib.rs` — `run()`: validate → preflight → db snapshot → archive →
   encrypt → deliver → (on success only) retention cleanup; `stamp()` mints the
   second-precision UTC file name; `archive_stamp()`/`should_delete()` are the

@@ -1,7 +1,7 @@
 //! Real-binary CLI tests: every invocation goes through the built executable
-//! (`CARGO_BIN_EXE_*`), covering the long-option-only surface, the
-//! type/value cross-checks, environment-variable handling, and the OpenPGP
-//! path with throwaway keys in a temporary GNUPGHOME.
+//! (`CARGO_BIN_EXE_*`), covering the `backup` subcommand's long-option-only
+//! surface, the type/value cross-checks, environment-variable handling, and
+//! the OpenPGP path with throwaway keys in a temporary GNUPGHOME.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -12,8 +12,8 @@ use std::path::{Path, PathBuf};
 
 use common::{bin, fingerprint_of, list_dir, list_fprs, make_sample_source, unpack};
 
-/// A ready `Command` for a real-binary run with the full long-flag set:
-/// `--source-type local` / `--local-source` / `--target-type local` /
+/// A ready `backup` subcommand for a real-binary run with the full long-flag
+/// set: `--source-type local` / `--local-source` / `--target-type local` /
 /// `--local-target` / `--name` / `--database-type sqlite` /
 /// `--encryption-type <encryption_type>` / one `--recipient` per entry.
 fn backup_cmd(
@@ -23,7 +23,7 @@ fn backup_cmd(
     encryption_type: &str,
     recipients: &[&str],
 ) -> std::process::Command {
-    let mut cmd = std::process::Command::new(bin());
+    let mut cmd = common::backup_cmd();
     cmd.arg("--source-type").arg("local");
     cmd.arg("--local-source").arg(src);
     cmd.arg("--target-type").arg("local");
@@ -38,9 +38,10 @@ fn backup_cmd(
     cmd
 }
 
-/// The clap-level required options: the type/enum selectors and `--name`.
-/// (`--local-source`, `--local-target`, `--recipient` are not clap-required;
-/// they are cross-checked against the declared types in preflight.)
+/// The clap-level required options of the `backup` subcommand: the
+/// type/enum selectors and `--name`. (`--local-source`, `--local-target`,
+/// `--recipient` are not clap-required; they are cross-checked against the
+/// declared types in preflight.)
 fn assert_usage_err(err: &anyhow::Error) {
     let s = err.to_string();
     for word in [
@@ -56,8 +57,20 @@ fn assert_usage_err(err: &anyhow::Error) {
 }
 
 #[test]
-fn cli_no_args_fails_listing_required() {
+fn cli_no_args_fails_naming_subcommand() {
+    // No subcommand: nothing can run, and the error must name `backup`.
     let out = std::process::Command::new(bin()).output().unwrap();
+    assert!(!out.status.success(), "no-args run must fail");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        stderr.contains("backup"),
+        "the error must name the required subcommand: {stderr}"
+    );
+}
+
+#[test]
+fn cli_backup_no_args_fails_listing_required() {
+    let out = common::backup_cmd().output().unwrap();
     assert!(!out.status.success(), "no-args run must fail");
     let stderr = String::from_utf8_lossy(&out.stderr).to_string();
     assert_usage_err(&anyhow::anyhow!("{stderr}"));
@@ -74,7 +87,7 @@ fn cli_all_env_vars_succeed() {
     let src = make_sample_source(root);
     let target = root.join("out");
 
-    let mut cmd = std::process::Command::new(bin());
+    let mut cmd = common::backup_cmd();
     cmd.env_clear();
     cmd.env("PATH", std::env::var("PATH").unwrap());
     cmd.env("VWB_SOURCE_TYPE", "local");
@@ -108,7 +121,7 @@ fn cli_cli_option_overrides_env() {
     let target = root.join("out");
     let other = root.join("other-out");
 
-    let mut cmd = std::process::Command::new(bin());
+    let mut cmd = common::backup_cmd();
     cmd.env_clear();
     cmd.env("PATH", std::env::var("PATH").unwrap());
     cmd.env("VWB_SOURCE_TYPE", "local");
@@ -146,7 +159,7 @@ fn cli_multiple_local_targets_comma_and_repeat() {
 
     // `a,b` in one comma-separated value, plus a second occurrence:
     // three targets must be delivered, one stdout line each.
-    let mut cmd = std::process::Command::new(bin());
+    let mut cmd = common::backup_cmd();
     cmd.arg("--source-type").arg("local");
     cmd.arg("--local-source").arg(&src);
     cmd.arg("--target-type").arg("local");
@@ -194,7 +207,7 @@ fn cli_local_source_flag_missing_fails() {
 
     // --source-type local declared, but --local-source is absent: the
     // type/value cross-check must fail before any work.
-    let mut cmd = std::process::Command::new(bin());
+    let mut cmd = common::backup_cmd();
     cmd.arg("--source-type").arg("local");
     cmd.arg("--target-type").arg("local");
     cmd.arg("--local-target").arg(&target);
@@ -223,7 +236,7 @@ fn cli_local_target_flag_missing_fails() {
     let target = root.join("out");
 
     // --target-type local declared, but no --local-target.
-    let mut cmd = std::process::Command::new(bin());
+    let mut cmd = common::backup_cmd();
     cmd.arg("--source-type").arg("local");
     cmd.arg("--local-source").arg(&src);
     cmd.arg("--target-type").arg("local");
@@ -532,7 +545,7 @@ fn gpg_recipients_via_env_var_comma_separated() {
     // comma-separated. If clap did not split the env value on the
     // delimiter, the joined string would be an invalid recipient and
     // preflight would fail.
-    let mut cmd = std::process::Command::new(bin());
+    let mut cmd = common::backup_cmd();
     cmd.env("GNUPGHOME", &g1);
     cmd.env("VWB_RECIPIENTS", format!("{},{}", fprs[0], fprs[1]));
     cmd.env("VWB_ENCRYPTION_TYPE", "openpgp");
@@ -573,7 +586,7 @@ fn gpg_recipients_via_env_var_comma_separated() {
 
     // Single-recipient env value (no comma) must still work: the common
     // cron case of exporting one fingerprint.
-    let mut cmd = std::process::Command::new(bin());
+    let mut cmd = common::backup_cmd();
     cmd.env("GNUPGHOME", &g1);
     cmd.env("VWB_RECIPIENTS", &fprs[0]);
     cmd.env("VWB_ENCRYPTION_TYPE", "openpgp");
@@ -607,7 +620,7 @@ fn gpg_recipients_via_env_var_comma_separated() {
 
     // Command line wins over the env var: --recipient with one key must
     // produce exactly that key's packet, not the env value's two.
-    let mut cmd = std::process::Command::new(bin());
+    let mut cmd = common::backup_cmd();
     cmd.env("GNUPGHOME", &g1);
     cmd.env("VWB_RECIPIENTS", format!("{},{}", fprs[0], fprs[1]));
     cmd.env("VWB_ENCRYPTION_TYPE", "openpgp");
@@ -747,7 +760,7 @@ fn cli_unsupported_database_type_fails_at_parse() {
     let src = make_sample_source(root);
     let target = root.join("out");
 
-    let mut cmd = std::process::Command::new(bin());
+    let mut cmd = common::backup_cmd();
     cmd.arg("--source-type").arg("local");
     cmd.arg("--local-source").arg(&src);
     cmd.arg("--target-type").arg("local");
@@ -826,7 +839,7 @@ fn cli_unsupported_encryption_type_fails_at_parse() {
     let src = make_sample_source(root);
     let target = root.join("out");
 
-    let mut cmd = std::process::Command::new(bin());
+    let mut cmd = common::backup_cmd();
     cmd.arg("--source-type").arg("local");
     cmd.arg("--local-source").arg(&src);
     cmd.arg("--target-type").arg("local");
@@ -874,7 +887,7 @@ fn cli_retention_invalid_value_rejected() {
     let target = root.join("out");
 
     for bad in ["0d", "0h", "d", "h", "1x", "+1d", "abc", ""] {
-        let mut cmd = std::process::Command::new(bin());
+        let mut cmd = common::backup_cmd();
         cmd.arg("--source-type").arg("local");
         cmd.arg("--local-source").arg(&src);
         cmd.arg("--target-type").arg("local");
@@ -905,7 +918,7 @@ fn cli_retention_period_valid_forms() {
     let src = make_sample_source(root);
     for form in ["7d", "2h", "unlimited"] {
         let target = root.join(format!("out-{form}"));
-        let mut cmd = std::process::Command::new(bin());
+        let mut cmd = common::backup_cmd();
         cmd.arg("--source-type").arg("local");
         cmd.arg("--local-source").arg(&src);
         cmd.arg("--target-type").arg("local");
