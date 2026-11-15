@@ -120,5 +120,5 @@ pub fn list_fprs(gnupg_home: &Path) -> Vec<String> {
 /// every integration-test crate, so it is read with env!, not
 /// std::env::var.
 pub fn bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_vaultwarden-backup"))
+    PathBuf::from(env!("CARGO_BIN_EXE_vwb"))
 }

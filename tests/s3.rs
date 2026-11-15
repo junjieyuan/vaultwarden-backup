@@ -185,14 +185,14 @@ fn s3_target_e2e_upload_nooverwrite_and_unpack() {
     let root = tmp.path();
     let src = make_sample_source(root);
 
-    let s3 = vaultwarden_backup::S3Target {
+    let s3 = vwb::S3Target {
         endpoint: endpoint.clone(),
         region: "us-east-1".into(),
         access_key: ak.clone(),
         secret_key: sk.clone(),
         bucket: bucket.clone(),
         prefix: "e2e".into(),
-        addressing: vaultwarden_backup::S3Addressing::PathStyle,
+        addressing: vwb::S3Addressing::PathStyle,
     };
     // The bucket must already exist (CI provisions it; local runs must create
     // it first) — object_store has no bucket-creation API.
@@ -211,20 +211,20 @@ fn s3_target_e2e_upload_nooverwrite_and_unpack() {
         .build()
         .unwrap();
 
-    let delivered = vaultwarden_backup::run(
+    let delivered = vwb::run(
         src.clone(),
-        vec![vaultwarden_backup::Target::S3(s3.clone())],
+        vec![vwb::Target::S3(s3.clone())],
         "arch".into(),
-        vaultwarden_backup::DatabaseType::Sqlite,
-        vaultwarden_backup::EncryptionType::None,
+        vwb::DatabaseType::Sqlite,
+        vwb::EncryptionType::None,
         Vec::new(),
-        vaultwarden_backup::RetentionPeriod::Unlimited,
+        vwb::RetentionPeriod::Unlimited,
     )
     .unwrap();
     assert_eq!(delivered.len(), 1, "one delivery");
     let (b, key) = match &delivered[0] {
-        vaultwarden_backup::Delivered::S3 { bucket: b, key } => (b.clone(), key.clone()),
-        vaultwarden_backup::Delivered::Local(_) => panic!("expected an S3 delivery"),
+        vwb::Delivered::S3 { bucket: b, key } => (b.clone(), key.clone()),
+        vwb::Delivered::Local(_) => panic!("expected an S3 delivery"),
     };
     assert_eq!(&b, &bucket);
     assert!(key.starts_with("e2e/arch-"), "{key}");
@@ -252,7 +252,7 @@ fn s3_target_e2e_upload_nooverwrite_and_unpack() {
     // boundaries, like the local variant of this test).
     let mut collided = false;
     for _ in 0..5 {
-        let stamp = vaultwarden_backup::stamp(&time::OffsetDateTime::now_utc());
+        let stamp = vwb::stamp(&time::OffsetDateTime::now_utc());
         let occ = format!("e2e/occ-{stamp}.tgz");
         rt.block_on(async {
             let _ = client.delete(&ObjPath::from(occ.as_str())).await;
@@ -264,14 +264,14 @@ fn s3_target_e2e_upload_nooverwrite_and_unpack() {
                 .await
                 .unwrap();
         });
-        let err = vaultwarden_backup::run(
+        let err = vwb::run(
             src.clone(),
-            vec![vaultwarden_backup::Target::S3(s3.clone())],
+            vec![vwb::Target::S3(s3.clone())],
             "occ".into(),
-            vaultwarden_backup::DatabaseType::Sqlite,
-            vaultwarden_backup::EncryptionType::None,
+            vwb::DatabaseType::Sqlite,
+            vwb::EncryptionType::None,
             Vec::new(),
-            vaultwarden_backup::RetentionPeriod::Unlimited,
+            vwb::RetentionPeriod::Unlimited,
         );
         if err.is_err() {
             collided = true;
@@ -314,14 +314,14 @@ fn s3_retention_cleanup_deletes_expired() {
     let src = make_sample_source(root);
 
     let prefix = "ret";
-    let s3 = vaultwarden_backup::S3Target {
+    let s3 = vwb::S3Target {
         endpoint: endpoint.clone(),
         region: "us-east-1".into(),
         access_key: ak.clone(),
         secret_key: sk.clone(),
         bucket: bucket.clone(),
         prefix: prefix.into(),
-        addressing: vaultwarden_backup::S3Addressing::PathStyle,
+        addressing: vwb::S3Addressing::PathStyle,
     };
     let client = AmazonS3Builder::new()
         .with_region("us-east-1")
@@ -343,7 +343,7 @@ fn s3_retention_cleanup_deletes_expired() {
     // run are removed so the assertions below are exact.
     let expired_key = format!("{prefix}/arch-{EXPIRED_STAMP}.tgz");
     let now = time::OffsetDateTime::now_utc();
-    let future_stamp = vaultwarden_backup::stamp(&(now + time::Duration::hours(2)));
+    let future_stamp = vwb::stamp(&(now + time::Duration::hours(2)));
     let fresh_key = format!("{prefix}/arch-{future_stamp}.tgz");
     let foreign_key = format!("{prefix}/other-{EXPIRED_STAMP}.tgz");
     for key in [&expired_key, &fresh_key, &foreign_key] {
@@ -361,14 +361,14 @@ fn s3_retention_cleanup_deletes_expired() {
         }
     });
 
-    let delivered = vaultwarden_backup::run(
+    let delivered = vwb::run(
         src,
-        vec![vaultwarden_backup::Target::S3(s3.clone())],
+        vec![vwb::Target::S3(s3.clone())],
         "arch".into(),
-        vaultwarden_backup::DatabaseType::Sqlite,
-        vaultwarden_backup::EncryptionType::None,
+        vwb::DatabaseType::Sqlite,
+        vwb::EncryptionType::None,
         Vec::new(),
-        vaultwarden_backup::RetentionPeriod::Days(7),
+        vwb::RetentionPeriod::Days(7),
     )
     .unwrap();
     assert_eq!(delivered.len(), 1, "one delivery");

@@ -34,7 +34,7 @@ The archive is safe to upload and safe to restore:
 ## Usage
 
 ```
-vaultwarden-backup
+vwb
   --source-type <TYPE> --local-source <DIR>
   --target-type <TYPE> [--local-target <DIR>]...
   [--s3-endpoint <URL> --s3-region <REGION> --s3-access-key <KEY>
@@ -94,14 +94,14 @@ target is named and the already-delivered ones stay.
 
 ```sh
 # command line, plaintext (--encryption-type none means no --recipient)
-vaultwarden-backup \
+vwb \
   --source-type local --local-source /srv/vaultwarden/data \
   --target-type local --local-target /backup \
   --name vaultwarden-backup --database-type sqlite --encryption-type none \
   --retention-period 30d
 
 # two local destinations, encrypted (recipients may be repeated or comma-separated)
-vaultwarden-backup \
+vwb \
   --source-type local --local-source /srv/vaultwarden/data \
   --target-type local --local-target /backup,/backup-raid \
   --name vaultwarden-backup --database-type sqlite --encryption-type openpgp \
@@ -109,7 +109,7 @@ vaultwarden-backup \
   --retention-period 14d
 
 # S3-compatible target (Cloudflare R2), encrypted (plaintext is never uploaded)
-vaultwarden-backup \
+vwb \
   --source-type local --local-source /srv/vaultwarden/data \
   --target-type s3 --s3-endpoint https://<account_id>.r2.example.com \
   --s3-region auto --s3-access-key <R2_ACCESS_KEY> --s3-secret-key <R2_SECRET_KEY> \
@@ -128,11 +128,11 @@ export VWB_NAME=vaultwarden-backup VWB_DATABASE_TYPE=sqlite
 export VWB_ENCRYPTION_TYPE=openpgp
 export VWB_RECIPIENTS=AAAABBBBCCCCDDDD111122223333444455556666
 export VWB_RETENTION_PERIOD=14d
-vaultwarden-backup
+vwb
 ```
 
 ```cron
-0 3 * * * VWB_SOURCE_TYPE=local VWB_LOCAL_SOURCE=/srv/vaultwarden/data VWB_TARGET_TYPE=local VWB_LOCAL_TARGET=/backup VWB_NAME=vaultwarden-backup VWB_DATABASE_TYPE=sqlite VWB_ENCRYPTION_TYPE=openpgp VWB_RECIPIENTS=<FINGERPRINT> VWB_RETENTION_PERIOD=14d /usr/local/bin/vaultwarden-backup >> /var/log/vwb-backup.log 2>&1
+0 3 * * * VWB_SOURCE_TYPE=local VWB_LOCAL_SOURCE=/srv/vaultwarden/data VWB_TARGET_TYPE=local VWB_LOCAL_TARGET=/backup VWB_NAME=vaultwarden-backup VWB_DATABASE_TYPE=sqlite VWB_ENCRYPTION_TYPE=openpgp VWB_RECIPIENTS=<FINGERPRINT> VWB_RETENTION_PERIOD=14d /usr/local/bin/vwb >> /var/log/vwb-backup.log 2>&1
 ```
 
 ## S3-compatible object storage targets
@@ -278,7 +278,7 @@ toolchain (with `clippy`/`rustfmt` components) for rustup users — clone and
 `cargo build` just works, in CI too.
 
 ```sh
-cargo build --release   # -> target/release/vaultwarden-backup
+cargo build --release   # -> target/release/vwb
 cargo test              # unit + integration (incl. real-binary CLI tests)
 ```
 
