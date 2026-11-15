@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
-use vaultwarden_backup::{
+use vwb::{
     DatabaseType, Delivered, EncryptionType, RetentionPeriod, S3Addressing, S3Target, Target,
 };
 
@@ -240,7 +240,7 @@ fn main() -> Result<()> {
         }));
     }
 
-    let delivered = vaultwarden_backup::run(
+    let delivered = vwb::run(
         source,
         targets,
         cli.name,

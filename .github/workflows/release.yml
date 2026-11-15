@@ -73,7 +73,7 @@ jobs:
       # code. --locked keeps release builds on the committed Cargo.lock.
       - uses: taiki-e/upload-rust-binary-action@v1
         with:
-          bin: vaultwarden-backup
+          bin: vwb
           target: ${{ matrix.target }}
           checksum: sha256
           locked: true

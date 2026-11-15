@@ -9,7 +9,7 @@ mod common;
 use std::fs;
 use std::path::Path;
 
-use vaultwarden_backup::{DatabaseType, Delivered, EncryptionType, RetentionPeriod, Target};
+use vwb::{DatabaseType, Delivered, EncryptionType, RetentionPeriod, Target};
 
 use common::{DB, list_dir, make_sample_source, unpack};
 
@@ -39,7 +39,7 @@ fn happy_path_snapshot_and_files() {
         drop(conn);
     }
 
-    let delivered = vaultwarden_backup::run(
+    let delivered = vwb::run(
         src.clone(),
         vec![Target::Local {
             dir: target.clone(),
@@ -141,7 +141,7 @@ fn multiple_local_targets_all_delivered() {
     let t1 = root.join("backups-a");
     let t2 = root.join("backups-b");
 
-    let delivered = vaultwarden_backup::run(
+    let delivered = vwb::run(
         src,
         vec![
             Target::Local { dir: t1.clone() },
@@ -178,7 +178,7 @@ fn multiple_local_targets_all_delivered() {
 fn no_targets_fails() {
     let tmp = tempfile::tempdir().unwrap();
     let src = make_sample_source(tmp.path());
-    let err = vaultwarden_backup::run(
+    let err = vwb::run(
         src,
         Vec::new(),
         "n".into(),
@@ -197,7 +197,7 @@ fn custom_name_prefix_is_used() {
     let root = tmp.path();
     let src = make_sample_source(root);
     let target = root.join("out");
-    let delivered = vaultwarden_backup::run(
+    let delivered = vwb::run(
         src,
         vec![Target::Local { dir: target }],
         "my-prefix".into(),
@@ -222,7 +222,7 @@ fn name_with_slash_fails_before_any_work() {
     let root = tmp.path();
     let src = make_sample_source(root);
     let target = root.join("out");
-    let err = vaultwarden_backup::run(
+    let err = vwb::run(
         src,
         vec![Target::Local {
             dir: target.clone(),
@@ -256,7 +256,7 @@ fn duplicate_target_delivered_once() {
     let target_link = root.join("out-link");
     std::os::unix::fs::symlink(&target, &target_link).unwrap();
 
-    let delivered = vaultwarden_backup::run(
+    let delivered = vwb::run(
         src,
         vec![
             Target::Local {
@@ -279,7 +279,7 @@ fn duplicate_target_delivered_once() {
 #[test]
 fn missing_source_fails() {
     let tmp = tempfile::tempdir().unwrap();
-    let err = vaultwarden_backup::run(
+    let err = vwb::run(
         tmp.path().join("no-such-dir"),
         vec![Target::Local {
             dir: tmp.path().join("out"),
@@ -299,7 +299,7 @@ fn source_is_file_fails() {
     let tmp = tempfile::tempdir().unwrap();
     let f = tmp.path().join("not-a-dir");
     fs::write(&f, b"x").unwrap();
-    let err = vaultwarden_backup::run(
+    let err = vwb::run(
         f,
         vec![Target::Local {
             dir: tmp.path().join("out"),
@@ -320,7 +320,7 @@ fn source_without_db_fails() {
     let src = tmp.path().join("data");
     fs::create_dir_all(&src).unwrap();
     fs::write(src.join("config.json"), "{}").unwrap();
-    let err = vaultwarden_backup::run(
+    let err = vwb::run(
         src,
         vec![Target::Local {
             dir: tmp.path().join("out"),
@@ -349,7 +349,7 @@ fn source_without_db_fails() {
 fn source_and_target_nested_fails() {
     let tmp = tempfile::tempdir().unwrap();
     let src = make_sample_source(tmp.path());
-    let err = vaultwarden_backup::run(
+    let err = vwb::run(
         src.clone(),
         vec![Target::Local {
             dir: src.join("backups"),
@@ -378,7 +378,7 @@ fn live_wal_source_still_backs_up() {
     conn.execute("BEGIN IMMEDIATE", ()).unwrap();
     conn.execute("INSERT INTO notes(body) VALUES ('uncommitted')", ())
         .unwrap();
-    let delivered = vaultwarden_backup::run(
+    let delivered = vwb::run(
         src,
         vec![Target::Local { dir: out }],
         "n".into(),
@@ -423,7 +423,7 @@ fn retention_cleanup_deletes_expired_archives() {
     let foreign = target.join("someone-else-2020-01-02T03:04:05Z.tgz");
     fs::write(&foreign, b"foreign").unwrap();
 
-    let delivered = vaultwarden_backup::run(
+    let delivered = vwb::run(
         src,
         vec![Target::Local {
             dir: target.clone(),
@@ -459,7 +459,7 @@ fn failed_run_does_not_run_retention_cleanup() {
     let broken = root.join("broken");
     fs::write(&broken, b"not a directory").unwrap();
 
-    let err = vaultwarden_backup::run(
+    let err = vwb::run(
         src,
         vec![
             Target::Local {

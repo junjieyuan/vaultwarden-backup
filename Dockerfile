@@ -10,5 +10,5 @@ FROM docker.io/library/debian:trixie-slim@sha256:d7e12182ce18b85b93007c1dedf31f2
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates gnupg \
     && rm -rf /var/lib/apt/lists/*
-COPY --from=build /build/target/release/vaultwarden-backup /usr/local/bin/vaultwarden-backup
-ENTRYPOINT ["vaultwarden-backup"]
+COPY --from=build /build/target/release/vwb /usr/local/bin/vwb
+ENTRYPOINT ["vwb"]

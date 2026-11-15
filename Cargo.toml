@@ -1,5 +1,5 @@
 [package]
-name = "vaultwarden-backup"
+name = "vwb"
 version = "0.4.1"
 edition = "2024"
 rust-version = "1.100"
