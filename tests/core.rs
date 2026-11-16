@@ -7,6 +7,7 @@
 mod common;
 
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 use vwb::{DatabaseType, Delivered, EncryptionType, RetentionPeriod, Target};
@@ -443,21 +444,26 @@ fn retention_cleanup_deletes_expired_archives() {
 }
 
 #[test]
-fn failed_run_does_not_run_retention_cleanup() {
+fn failed_target_is_left_untouched_and_delivered_targets_are_cleaned() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
     let src = make_sample_source(root);
     let target = root.join("backups");
     fs::create_dir_all(&target).unwrap();
 
-    // An expired own archive that cleanup *would* remove if it ran.
+    // An expired own archive that cleanup *would* remove.
     let expired = target.join(format!("n-{EXPIRED_STAMP}.tgz"));
     fs::write(&expired, b"old bytes").unwrap();
 
-    // A second target that is a regular file: copying into it fails delivery,
-    // so `run` must return an error *before* retention cleanup runs.
-    let broken = root.join("broken");
-    fs::write(&broken, b"not a directory").unwrap();
+    // A second target whose copy fails at delivery time (a read-only
+    // directory), so the run fails — but the good target received the
+    // archive and must still be cleaned, while the failed target is left
+    // exactly as found.
+    let broken = root.join("readonly");
+    fs::create_dir_all(&broken).unwrap();
+    let broken_expired = broken.join(format!("n-{EXPIRED_STAMP}.tgz"));
+    fs::write(&broken_expired, b"old bytes").unwrap();
+    fs::set_permissions(&broken, fs::Permissions::from_mode(0o555)).unwrap();
 
     let err = vwb::run(
         src,
@@ -465,7 +471,9 @@ fn failed_run_does_not_run_retention_cleanup() {
             Target::Local {
                 dir: target.clone(),
             },
-            Target::Local { dir: broken },
+            Target::Local {
+                dir: broken.clone(),
+            },
         ],
         "n".into(),
         DatabaseType::Sqlite,
@@ -474,10 +482,347 @@ fn failed_run_does_not_run_retention_cleanup() {
         RetentionPeriod::Days(7),
     )
     .unwrap_err();
-    let _ = err;
-
+    let msg = err.to_string();
     assert!(
-        expired.exists(),
-        "cleanup must not run when the backup fails"
+        msg.contains(&format!("{}", broken.display())),
+        "the failing target must be named: {msg}"
+    );
+    // Restore write permission so the tempdir can be removed.
+    fs::set_permissions(&broken, fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(
+        broken_expired.exists(),
+        "the failed target must be left untouched"
+    );
+    assert!(
+        !expired.exists(),
+        "the delivered target must still be cleaned when a sibling fails"
+    );
+}
+
+/// A dead-end S3 target: `http://127.0.0.1:1` refuses the connection, so the
+/// preflight head fails fast without a real server.
+fn dead_s3_target() -> vwb::S3Target {
+    vwb::S3Target {
+        endpoint: "http://127.0.0.1:1".into(),
+        region: "us-east-1".into(),
+        access_key: "ak".into(),
+        secret_key: "sk".into(),
+        bucket: "bkt".into(),
+        prefix: "/".into(),
+        addressing: vwb::S3Addressing::PathStyle,
+    }
+}
+
+#[test]
+fn s3_preflight_failure_still_delivers_and_cleans_local() {
+    // An unreachable S3 endpoint: the S3 target's preflight fails, and the
+    // run must fail naming the S3 target — while the local target still
+    // receives the archive and is still cleaned.
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let src = make_sample_source(root);
+    let target = root.join("backups");
+    fs::create_dir_all(&target).unwrap();
+
+    let expired = target.join(format!("s3mix-{EXPIRED_STAMP}.tgz"));
+    fs::write(&expired, b"old bytes").unwrap();
+
+    let err = vwb::run(
+        src,
+        vec![
+            Target::Local {
+                dir: target.clone(),
+            },
+            Target::S3(dead_s3_target()),
+        ],
+        "s3mix".into(),
+        DatabaseType::Sqlite,
+        EncryptionType::None,
+        Vec::new(),
+        RetentionPeriod::Days(7),
+    )
+    .unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("s3://bkt/"),
+        "the failing S3 target must be named: {msg}"
+    );
+
+    // The local target still got the archive, and its expired own archive
+    // was still cleaned despite the failed run.
+    let fresh: Vec<String> = list_dir(&target)
+        .into_iter()
+        .filter(|n| n.starts_with("s3mix-") && n.ends_with(".tgz"))
+        .collect();
+    assert_eq!(
+        fresh.len(),
+        1,
+        "local archive missing; dir: {}",
+        list_dir(&target).join(", ")
+    );
+    assert!(!expired.exists(), "delivered target must still be cleaned");
+}
+
+#[test]
+fn s3_only_preflight_failure_refuses_before_work() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = make_sample_source(tmp.path());
+
+    // No local target: the S3 target is the only recipient, so its preflight
+    // failure still refuses the whole run before any backup work.
+    let err = vwb::run(
+        src,
+        vec![Target::S3(dead_s3_target())],
+        "n".into(),
+        DatabaseType::Sqlite,
+        EncryptionType::None,
+        Vec::new(),
+        RetentionPeriod::Unlimited,
+    )
+    .unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("no target is left"),
+        "an S3-only run must refuse on preflight failure: {msg}"
+    );
+}
+
+#[test]
+fn bad_local_target_fails_only_itself() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let src = make_sample_source(root);
+    let good = root.join("good");
+    fs::create_dir_all(&good).unwrap();
+
+    // A target whose parent is a regular file: preparation fails for it
+    // alone, and the good target still receives the archive.
+    let blocker = root.join("blocker");
+    fs::write(&blocker, b"not a directory").unwrap();
+    let bad = blocker.join("sub");
+
+    let err = vwb::run(
+        src,
+        vec![
+            Target::Local { dir: good.clone() },
+            Target::Local { dir: bad.clone() },
+        ],
+        "n".into(),
+        DatabaseType::Sqlite,
+        EncryptionType::None,
+        Vec::new(),
+        RetentionPeriod::Unlimited,
+    )
+    .unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains(&format!("{}", blocker.display())),
+        "the failing target must be named: {msg}"
+    );
+    let fresh: Vec<String> = list_dir(&good)
+        .into_iter()
+        .filter(|n| n.starts_with("n-"))
+        .collect();
+    assert_eq!(
+        fresh.len(),
+        1,
+        "the good target must still be delivered; dir: {}",
+        list_dir(&good).join(", ")
+    );
+}
+
+#[test]
+fn collided_target_fails_only_itself() {
+    // A same-second re-run: the target that already holds the file name
+    // fails on its own, and the other target is still delivered. Retrying
+    // across a few attempts makes the test immune to a second boundary
+    // slipping between the occupation and the run's stamp.
+    for _ in 0..5 {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let src = make_sample_source(root);
+        let a = root.join("a");
+        let b = root.join("b");
+        fs::create_dir_all(&a).unwrap();
+        fs::create_dir_all(&b).unwrap();
+        // Occupy `a` with this run's would-be file name.
+        let occupied = format!("x-{}.tgz", vwb::stamp(&time::OffsetDateTime::now_utc()));
+        fs::write(a.join(&occupied), b"occupied").unwrap();
+
+        let run = vwb::run(
+            src.clone(),
+            vec![
+                Target::Local { dir: a.clone() },
+                Target::Local { dir: b.clone() },
+            ],
+            "x".into(),
+            DatabaseType::Sqlite,
+            EncryptionType::None,
+            Vec::new(),
+            RetentionPeriod::Unlimited,
+        );
+        if run.is_ok() {
+            // The run outlived the occupied second: no collision, retry.
+            continue;
+        }
+        let msg = run.unwrap_err().to_string();
+        assert!(
+            msg.contains(&format!("{}", a.display())),
+            "the collided target must be named: {msg}"
+        );
+        assert!(
+            !msg.contains(&format!("{}", b.display())),
+            "only the collided target must fail: {msg}"
+        );
+        // The free target still received the archive.
+        let fresh: Vec<String> = list_dir(&b)
+            .into_iter()
+            .filter(|n| n.starts_with("x-"))
+            .collect();
+        assert_eq!(
+            fresh.len(),
+            1,
+            "the free target must still be delivered; dir: {}",
+            list_dir(&b).join(", ")
+        );
+        break;
+    }
+}
+
+/// Like `dead_s3_target()`, but with a malformed endpoint URL, so the
+/// failure happens at client build — no network involved, instant.
+fn bad_endpoint_s3_target() -> vwb::S3Target {
+    let mut s3 = dead_s3_target();
+    s3.endpoint = "not-a-url".into();
+    s3
+}
+
+#[test]
+fn s3_bad_endpoint_fails_only_the_s3_target() {
+    // A malformed endpoint URL: the S3 target fails at client build (no
+    // network), and the local target still receives the archive.
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let src = make_sample_source(root);
+    let target = root.join("backups");
+    fs::create_dir_all(&target).unwrap();
+
+    let err = vwb::run(
+        src,
+        vec![
+            Target::Local {
+                dir: target.clone(),
+            },
+            Target::S3(bad_endpoint_s3_target()),
+        ],
+        "n".into(),
+        DatabaseType::Sqlite,
+        EncryptionType::None,
+        Vec::new(),
+        RetentionPeriod::Unlimited,
+    )
+    .unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("s3://bkt/"),
+        "the failing S3 target must be named: {msg}"
+    );
+    assert!(
+        msg.contains("not-a-url"),
+        "the malformed endpoint must be reported: {msg}"
+    );
+    let fresh: Vec<String> = list_dir(&target)
+        .into_iter()
+        .filter(|n| n.starts_with("n-"))
+        .collect();
+    assert_eq!(
+        fresh.len(),
+        1,
+        "the local target must still be delivered; dir: {}",
+        list_dir(&target).join(", ")
+    );
+}
+
+#[test]
+fn no_target_left_refusal_names_every_failed_target() {
+    // A bad local target (parent is a regular file) and a bad S3 endpoint:
+    // no target is left to receive the artifact, so the run refuses before
+    // any work and names every failure.
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let src = make_sample_source(root);
+
+    let blocker = root.join("blocker");
+    fs::write(&blocker, b"not a directory").unwrap();
+    let bad = blocker.join("sub");
+
+    let err = vwb::run(
+        src,
+        vec![
+            Target::Local { dir: bad.clone() },
+            Target::S3(bad_endpoint_s3_target()),
+        ],
+        "n".into(),
+        DatabaseType::Sqlite,
+        EncryptionType::None,
+        Vec::new(),
+        RetentionPeriod::Unlimited,
+    )
+    .unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.starts_with("no target is left"),
+        "the refusal must be before any backup work: {msg}"
+    );
+    assert!(
+        msg.contains(&format!("{}", blocker.display())),
+        "the local failure must be named: {msg}"
+    );
+    assert!(
+        msg.contains("s3://bkt/"),
+        "the S3 failure must be named: {msg}"
+    );
+}
+
+#[test]
+fn nested_target_fails_only_itself() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let src = make_sample_source(root);
+    let good = root.join("good");
+    fs::create_dir_all(&good).unwrap();
+    let nested = src.join("backups");
+
+    // A target nested in the source fails on its own, and the good target
+    // still receives the archive.
+    let err = vwb::run(
+        src.clone(),
+        vec![
+            Target::Local {
+                dir: nested.clone(),
+            },
+            Target::Local { dir: good.clone() },
+        ],
+        "n".into(),
+        DatabaseType::Sqlite,
+        EncryptionType::None,
+        Vec::new(),
+        RetentionPeriod::Unlimited,
+    )
+    .unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("nested"),
+        "the nested target must fail with the nesting reason: {msg}"
+    );
+    let fresh: Vec<String> = list_dir(&good)
+        .into_iter()
+        .filter(|n| n.starts_with("n-"))
+        .collect();
+    assert_eq!(
+        fresh.len(),
+        1,
+        "the good target must still be delivered; dir: {}",
+        list_dir(&good).join(", ")
     );
 }

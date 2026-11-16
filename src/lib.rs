@@ -52,9 +52,10 @@ pub enum EncryptionType {
 
 /// Retention period for previously delivered archives of this run's name.
 /// `unlimited` keeps everything; a value is one of `unlimited`, `<N>d`
-/// (days), or `<N>h` (hours) with `N` a positive integer. After a fully
-/// successful run, archives named `<name>-<UTC stamp>.tgz[.gpg]` older than
-/// the period are deleted from each local target and the S3 prefix.
+/// (days), or `<N>h` (hours) with `N` a positive integer. After each run,
+/// for every target that received this run's archive, archives named
+/// `<name>-<UTC stamp>.tgz[.gpg]` older than the period are deleted from
+/// it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RetentionPeriod {
     /// Keep every archive; cleanup is a no-op.
@@ -123,6 +124,10 @@ pub const DB_FILENAME: &str = "db.sqlite3";
 
 /// Run one backup into every declared target; returns one `Delivered` per
 /// target — local paths first (in the order given), then the S3 object.
+/// Targets are completely independent: each is prepared, checked and
+/// delivered on its own; any failure still fails the run, naming every
+/// failing target. The only refusal is a run in which no target is left
+/// to receive the artifact, which aborts before any backup work.
 pub fn run(
     local_source: PathBuf,
     targets: Vec<Target>,
@@ -190,64 +195,89 @@ pub fn run(
         }
     }
 
-    // canonicalize resolves symlinks and `..`, so two spellings of one
-    // physical directory collapse to a single entry and are delivered once.
-    // The S3 destination has no path, so it skips the nesting checks.
-    let mut targets: Vec<PathBuf> = Vec::new();
-    let mut seen: HashSet<PathBuf> = HashSet::new();
-    for t in &local_dirs {
-        fs::create_dir_all(t)
-            .with_context(|| format!("create target directory {}", t.display()))?;
-        let t = t
-            .canonicalize()
-            .with_context(|| format!("canonicalize target directory {}", t.display()))?;
-        if seen.insert(t.clone()) {
-            targets.push(t);
-        }
-    }
-    for target in &targets {
-        if *target == source {
-            bail!(
-                "source and target must be different directories ({})",
-                target.display()
-            );
-        }
-        if target.starts_with(&source) || source.starts_with(target) {
-            // Otherwise the archive lands inside its own input and gets re-read
-            // on the next run.
-            bail!(
-                "source and target must not be nested ({})",
-                target.display()
-            );
-        }
-    }
-
     let archive_name = format!("{name}-{stamp}.tgz");
-
-    // Refuse before doing any backup work when this run's artifact name
-    // already exists in a target: the second-precision timestamp cannot
-    // mint a distinct name within the same second, so a re-run would just
-    // collide at delivery time. The final extension depends on the
-    // encryption mode (.gpg appended for openpgp). `deliver()` repeats this
-    // check as a race guard.
+    // The final extension depends on the encryption mode (.gpg appended for
+    // openpgp); the name is fixed before anything is checked or written.
     let final_name = match encryption_type {
         EncryptionType::None => archive_name.clone(),
         EncryptionType::Openpgp => format!("{archive_name}.gpg"),
     };
-    if !targets.is_empty() {
-        deliver::ensure_targets_free(&targets, &final_name)?;
-    }
-    // Build the S3 client early (fails fast on a malformed endpoint) and
-    // check the object is free before any backup work — the same
-    // refuse-before-work rule as the local targets.
-    let s3_client = match &s3_target {
-        Some(s3) => {
-            let client = s3::client(s3)?;
-            s3::ensure_object_free(&client, &s3::join_prefix(&s3.prefix, &final_name))?;
-            Some(client)
+
+    // Canonicalize each local target so two spellings of one physical
+    // directory collapse to a single entry. A target that is the source or
+    // nested in it — an archive there would land inside its own input and
+    // get re-read on the next run — fails as its own outcome.
+    let mut local_targets: Vec<PathBuf> = Vec::new();
+    let mut seen: HashSet<PathBuf> = HashSet::new();
+    let mut failures: Vec<String> = Vec::new();
+    for t in &local_dirs {
+        let prepared = fs::create_dir_all(t)
+            .with_context(|| format!("create target directory {}", t.display()))
+            .and_then(|()| {
+                t.canonicalize()
+                    .with_context(|| format!("canonicalize target directory {}", t.display()))
+            });
+        match prepared {
+            Ok(t) if t == source => failures.push(format!(
+                "{}: source and target must be different directories",
+                t.display()
+            )),
+            Ok(t) if t.starts_with(&source) || source.starts_with(&t) => failures.push(format!(
+                "{}: source and target must not be nested",
+                t.display()
+            )),
+            Ok(t) => {
+                if seen.insert(t.clone()) {
+                    local_targets.push(t);
+                }
+            }
+            Err(err) => failures.push(format!("{}: {err:#}", t.display())),
         }
-        None => None,
+    }
+
+    // A target that already holds this run's file name (a re-run within the
+    // same second) fails on its own; `deliver()` repeats the check per
+    // target as a race guard.
+    let mut free_targets: Vec<PathBuf> = Vec::new();
+    for t in local_targets.drain(..) {
+        if t.join(&final_name).exists() {
+            failures.push(format!("{}: {} already exists", t.display(), final_name));
+        } else {
+            free_targets.push(t);
+        }
+    }
+
+    // Build the S3 client and preflight the object; a failure is the S3
+    // target's outcome, recorded once below — a broken S3 must not cost the
+    // local targets their backup, so the upload is skipped.
+    let (s3_client, s3_preflight) = match &s3_target {
+        Some(s3) => {
+            let key = s3::join_prefix(&s3.prefix, &final_name);
+            match s3::client(s3) {
+                Ok(client) => {
+                    let preflight = s3::ensure_object_free(&client, &key);
+                    (Some(client), preflight)
+                }
+                Err(err) => (None, Err(err)),
+            }
+        }
+        None => (None, Ok(())),
     };
+    if let (Some(s3), Err(err)) = (&s3_target, &s3_preflight) {
+        failures.push(format!(
+            "s3://{}/{}: {err:#}",
+            s3.bucket,
+            s3::join_prefix(&s3.prefix, &final_name)
+        ));
+    }
+    // Refuse before doing any backup work when no target is left to receive
+    // the artifact: archiving for zero recipients would be pure waste.
+    if free_targets.is_empty() && (s3_target.is_none() || s3_preflight.is_err()) {
+        bail!(
+            "no target is left to receive the artifact: {}",
+            failures.join("; ")
+        );
+    }
 
     // Scratch holds every intermediate; targets only ever see the finished
     // artifact, and with encryption the plaintext never leaves it.
@@ -269,58 +299,69 @@ pub fn run(
         }
     };
 
-    // Deliver to every target, collecting failures so a partial delivery
-    // names all failing targets and the successes stay. Local targets keep
-    // the existing `deliver` wording.
-    let total = targets.len() + usize::from(s3_target.is_some());
     let mut delivered: Vec<Delivered> = Vec::new();
-    let mut failures: Vec<String> = Vec::new();
-    if !targets.is_empty() {
-        match deliver::deliver(&final_path, &targets) {
-            Ok(paths) => delivered.extend(paths.into_iter().map(Delivered::Local)),
-            Err(err) => failures.push(err.to_string()),
+    let mut delivered_dirs: Vec<&PathBuf> = Vec::new();
+    if !free_targets.is_empty() {
+        for (i, outcome) in deliver::deliver(&final_path, &final_name, &free_targets)
+            .into_iter()
+            .enumerate()
+        {
+            match outcome {
+                Ok(path) => {
+                    delivered_dirs.push(&free_targets[i]);
+                    delivered.push(Delivered::Local(path));
+                }
+                Err(message) => failures.push(message),
+            }
         }
     }
-    if let (Some(s3), Some(client)) = (&s3_target, &s3_client) {
+    let mut s3_delivered = false;
+    if let Some(s3) = &s3_target {
         let key = s3::join_prefix(&s3.prefix, &final_name);
-        match s3::upload(client, &final_path, &key) {
-            Ok(()) => delivered.push(Delivered::S3 {
-                bucket: s3.bucket.clone(),
-                key,
-            }),
-            Err(err) => failures.push(format!("s3://{}/{key}: {err:#}", s3.bucket)),
+        // A preflight (or client-build) failure is already in `failures`,
+        // so only a successful preflight reaches the upload.
+        if s3_preflight.is_ok()
+            && let Some(client) = &s3_client
+        {
+            match s3::upload(client, &final_path, &key) {
+                Ok(()) => {
+                    s3_delivered = true;
+                    delivered.push(Delivered::S3 {
+                        bucket: s3.bucket.clone(),
+                        key,
+                    });
+                }
+                Err(err) => failures.push(format!("s3://{}/{}: {err:#}", s3.bucket, key)),
+            }
         }
+    }
+    // Retention cleanup is per target and best-effort: only the targets
+    // that received this run's archive are cleaned; a cleanup problem logs
+    // to stderr without failing the run.
+    let now = OffsetDateTime::now_utc();
+    for dir in &delivered_dirs {
+        deliver::cleanup_retention(dir, &name, &stamp, now, &retention_period);
+    }
+    if s3_delivered && let (Some(s3), Some(client)) = (&s3_target, &s3_client) {
+        s3::cleanup_retention(
+            client,
+            &s3.bucket,
+            &s3.prefix,
+            &name,
+            &stamp,
+            now,
+            &retention_period,
+        );
     }
     if failures.is_empty() {
-        // Retention cleanup runs only after a fully successful delivery, so a
-        // failed run never deletes anything. It is best-effort by design: a
-        // cleanup failure must not turn a successful backup into a failure,
-        // so it returns `()` and logs to stderr, never an `Err`.
-        let now = OffsetDateTime::now_utc();
-        for dir in &targets {
-            deliver::cleanup_retention(dir, &name, &stamp, now, &retention_period);
-        }
-        if let (Some(s3), Some(client)) = (&s3_target, &s3_client) {
-            s3::cleanup_retention(
-                client,
-                &s3.bucket,
-                &s3.prefix,
-                &name,
-                &stamp,
-                now,
-                &retention_period,
-            );
-        }
         Ok(delivered)
     } else if failures.len() == 1 {
-        // A single failure (typically the local-only case) keeps the
-        // original `deliver` wording verbatim.
         bail!("{}", failures[0])
     } else {
         bail!(
             "delivery failed for {} of {} target(s): {}",
             failures.len(),
-            total,
+            failures.len() + delivered.len(),
             failures.join("; ")
         )
     }
