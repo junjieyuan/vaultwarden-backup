@@ -1,6 +1,6 @@
 [package]
 name = "vwb"
-version = "0.4.1"
+version = "0.5.0"
 edition = "2024"
 rust-version = "1.100"
 description = "Backup a vaultwarden data directory to a timestamped .tgz (SQLite online backup + file tar)"
