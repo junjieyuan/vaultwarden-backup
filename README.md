@@ -78,13 +78,15 @@ error. The S3 destination follows the same rule, tightened: `--target-type s3`
 requires **all seven** `--s3-*` flags, and any `--s3-*` flag without
 `--target-type s3` is an error. Nothing about the S3 destination is silently
 defaulted — no implicit endpoint, region, prefix or addressing style.
-`--encryption-type` / `--recipient` follow the same rule. A preflight failure
-writes nothing to any target.
+`--encryption-type` / `--recipient` follow the same rule. A cross-check
+failure writes nothing to any target.
 
-The timestamp is UTC, the **start** time, at second precision. If a target
-already holds this run's file name (a re-run within the same second), the run
-aborts **before doing any backup work** instead of overwriting the previous
-archive — the check applies to local files **and** to the S3 object.
+The timestamp is UTC, the **start** time, at second precision. A target that
+already holds this run's file name (a re-run within the same second) fails
+**on its own** instead of being overwritten. The same applies to a local
+target that cannot be prepared (its parent is a regular file, or it is the
+source or nested in it). The run aborts **before doing any backup work**
+only when no target is left to receive the artifact.
 
 On success one line per target is printed to stdout, in target order: the
 delivered local path, or `s3://<bucket>/<key>` for the S3 target, and the exit
@@ -193,9 +195,15 @@ treated the same; nothing is AWS-specific.
   (`https://<endpoint>/<bucket>/<key>`, for IP/self-hosted and R2 endpoints,
   which cannot resolve `<bucket>.host`).
 - **No overwrites, ever:** an S3 object with this run's file name already
-  present (a same-second re-run) aborts the run before any backup work, and
-  the upload re-checks right before it starts — the same semantics as local
-  targets.
+  present (a same-second re-run) fails the S3 target instead of being
+  overwritten — the preflight checks it, and the upload re-checks right
+  before it starts.
+- **The S3 target is independent:** an S3 failure (malformed endpoint, bad
+  credentials, unreachable endpoint, missing bucket, present object) fails
+  only the S3 target — local targets still receive the archive, and the run
+  reports the failed S3 target by name. The run aborts **before any backup
+  work** only when no target is left to receive the artifact, e.g.
+  `--target-type s3` alone.
 - The upload is a streaming multipart upload; the object only appears
   atomically when complete, and memory stays flat even for very large
   archives. With `--encryption-type openpgp` only the encrypted file is
@@ -273,11 +281,11 @@ everything. The value is exactly one of:
 Any other value (zero, `0d`, a missing unit, a sign, a decimal, …) is rejected
 at parse time, naming the flag.
 
-**How cleanup works** (best-effort, on success only):
+**How cleanup works** (best-effort, per target):
 
-- After the archive is **fully delivered** to every target (and only then — a
-  failed run deletes nothing), cleanup walks each local target directory and,
-  for an S3 target, one level below its `--s3-prefix`.
+- After delivery, cleanup runs for **every target that received this run's
+  archive**. It walks each delivered local target directory and, for a
+  delivered S3 target, one level below its `--s3-prefix`.
 - It matches only this tool's own archives — a file name exactly
   `<name>-<UTC stamp>.tgz` (or `.tgz.gpg` when encrypted). Anything else,
   including other programs' files and archives under a different `--name`, is

@@ -123,9 +123,10 @@ struct Backup {
     recipients: Vec<String>,
 
     /// Retention period for this archive name: `unlimited`, `<N>d` (days) or
-    /// `<N>h` (hours), N a positive integer. After a fully successful run,
-    /// archives of this name older than the period are removed from every
-    /// local target and the S3 prefix; `unlimited` keeps everything.
+    /// `<N>h` (hours), N a positive integer. After each run, for every
+    /// target that received this run's archive (best-effort; a failing
+    /// target is left untouched), archives of this name older than the
+    /// period are removed from it; `unlimited` keeps everything.
     #[arg(
         long = "retention-period",
         required = true,

@@ -6,34 +6,31 @@ use std::fs;
 use std::mem::DropGuard;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use time::OffsetDateTime;
 
 use crate::{RetentionPeriod, archive_stamp, should_delete};
 
 /// Copy the finished artifact to every local target, atomically per target
-/// (`.part` -> rename). Targets are independent: one failing target does not
-/// stop the others, but any failure fails the whole run, with every failing
-/// target named.
-pub(crate) fn deliver(final_path: &Path, targets: &[PathBuf]) -> Result<Vec<PathBuf>> {
-    let file_name = final_path
-        .file_name()
-        .context("artifact has no file name")?
-        .to_string_lossy()
-        .to_string();
-
-    // Belt-and-braces: a concurrent run could have placed the file since the
-    // pre-check in `run()`.
-    ensure_targets_free(targets, &file_name)?;
-
-    let mut delivered = Vec::new();
-    let mut failures: Vec<String> = Vec::new();
+/// (`.part` -> rename), returning one outcome per target: `Ok(dest)` for a
+/// delivered copy, `Err(reason)` for a failed one. The per-target
+/// existence check is the race guard against a concurrent run; `run`
+/// aggregates the outcomes.
+pub(crate) fn deliver(
+    final_path: &Path,
+    file_name: &str,
+    targets: &[PathBuf],
+) -> Vec<Result<PathBuf, String>> {
+    let mut outcomes: Vec<Result<PathBuf, String>> = Vec::new();
     for target in targets {
-        let dest = target.join(&file_name);
-        // Between the pre-check and the copy a concurrent run could place
-        // the file; refuse to silently overwrite it.
+        let dest = target.join(file_name);
+        // Between the pre-check in `run()` and the copy a concurrent run
+        // could place the file; refuse to silently overwrite it.
         if dest.exists() {
-            failures.push(format!("{}: {file_name} already exists", target.display()));
+            outcomes.push(Err(format!(
+                "{}: {file_name} already exists",
+                target.display()
+            )));
             continue;
         }
         // A per-process part name: two concurrent runs delivering to the same
@@ -41,41 +38,11 @@ pub(crate) fn deliver(final_path: &Path, targets: &[PathBuf]) -> Result<Vec<Path
         // the other's half-written copy under the final name.
         let part = target.join(format!("{file_name}.part.{}", std::process::id()));
         match deliver_one(final_path, &part, &dest) {
-            Ok(()) => delivered.push(dest),
-            Err(err) => {
-                failures.push(format!("{}: {err:#}", target.display()));
-            }
+            Ok(()) => outcomes.push(Ok(dest)),
+            Err(err) => outcomes.push(Err(format!("{}: {err:#}", target.display()))),
         }
     }
-    if failures.is_empty() {
-        Ok(delivered)
-    } else {
-        bail!(
-            "delivery failed for {} of {} target(s): {}",
-            failures.len(),
-            targets.len(),
-            failures.join("; ")
-        )
-    }
-}
-
-/// Refuse a run when any target already holds `file_name`: with a
-/// second-precision timestamp, re-running within the same second would
-/// otherwise silently overwrite a previous backup.
-pub(crate) fn ensure_targets_free(targets: &[PathBuf], file_name: &str) -> Result<()> {
-    let collisions: Vec<String> = targets
-        .iter()
-        .filter(|t| t.join(file_name).exists())
-        .map(|t| t.display().to_string())
-        .collect();
-    if !collisions.is_empty() {
-        bail!(
-            "target(s) already contain {file_name}: {}; remove them or run later \
-             (a same-second run would overwrite a previous backup)",
-            collisions.join(", ")
-        );
-    }
-    Ok(())
+    outcomes
 }
 
 /// One delivery: `fs::copy` over a unique `.part.<pid>` name, fsync, then
@@ -177,20 +144,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ensure_targets_free_detects_existing_file() {
-        let tmp = tempfile::tempdir().unwrap();
-        let a = tmp.path().join("a");
-        let b = tmp.path().join("b");
-        fs::create_dir_all(&a).unwrap();
-        fs::create_dir_all(&b).unwrap();
-
-        assert!(ensure_targets_free(&[a.clone(), b.clone()], "x.tgz").is_ok());
-        fs::write(b.join("x.tgz"), b"old").unwrap();
-        let err = ensure_targets_free(&[a, b], "x.tgz").unwrap_err();
-        assert!(err.to_string().contains("x.tgz"), "{err:?}");
-    }
-
-    #[test]
     fn partial_delivery_failure_names_targets_and_keeps_successes() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
@@ -205,13 +158,45 @@ mod tests {
         let artifact = root.join("art.tgz");
         fs::write(&artifact, b"payload").unwrap();
 
-        let err = deliver(&artifact, &[a.clone(), b.clone()]).unwrap_err();
-        assert!(err.to_string().contains("1 of 2"), "{err:?}");
-        assert!(
-            err.to_string().contains(&b.display().to_string()),
-            "the failing target must be named: {err:?}"
-        );
+        let outcomes = deliver(&artifact, "art.tgz", &[a.clone(), b.clone()]);
         // The independent good target is still delivered.
+        assert!(
+            outcomes[0].is_ok(),
+            "the independent good target is still delivered"
+        );
         assert_eq!(fs::read(a.join("art.tgz")).unwrap(), b"payload");
+        let err = outcomes[1].as_ref().unwrap_err();
+        assert!(
+            err.contains(&b.display().to_string()),
+            "the failing target must be named: {err}"
+        );
+    }
+
+    #[test]
+    fn existing_name_fails_only_its_own_target() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let a = root.join("a");
+        let b = root.join("b");
+        fs::create_dir_all(&a).unwrap();
+        fs::create_dir_all(&b).unwrap();
+
+        let artifact = root.join("art.tgz");
+        fs::write(&artifact, b"payload").unwrap();
+        // `b` already holds this run's file name: only `b` fails, `a` is
+        // still delivered.
+        fs::write(b.join("art.tgz"), b"old").unwrap();
+
+        let outcomes = deliver(&artifact, "art.tgz", &[a.clone(), b.clone()]);
+        assert!(
+            outcomes[0].is_ok(),
+            "a same-name collision in one target must not stop the others"
+        );
+        assert_eq!(fs::read(a.join("art.tgz")).unwrap(), b"payload");
+        let err = outcomes[1].as_ref().unwrap_err();
+        assert!(
+            err.contains("already exists"),
+            "the collision must be named per target: {err}"
+        );
     }
 }

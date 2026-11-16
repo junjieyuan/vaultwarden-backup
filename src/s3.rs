@@ -40,6 +40,11 @@ static RUNTIME: OnceLock<Result<tokio::runtime::Runtime, String>> = OnceLock::ne
 /// set on both branches because the SDK default is path-style, and `http://`
 /// endpoints must opt into plain HTTP explicitly.
 pub(crate) fn client(target: &S3Target) -> Result<AmazonS3> {
+    // Parse the endpoint before handing it to the SDK: an invalid URL
+    // would panic deep in the SDK's request signing instead of failing
+    // this target cleanly.
+    reqwest::Url::parse(&target.endpoint)
+        .with_context(|| format!("parse S3 endpoint '{}'", target.endpoint))?;
     let mut builder = AmazonS3Builder::new()
         .with_region(&target.region)
         .with_access_key_id(&target.access_key)
@@ -71,11 +76,10 @@ pub(crate) fn join_prefix(prefix: &str, file_name: &str) -> String {
     }
 }
 
-/// Refuse a run when object `key` already exists — the S3 analogue of
-/// `deliver::ensure_targets_free`: with a second-precision timestamp, a
-/// same-second re-run would otherwise silently overwrite a previous backup.
-/// `NotFound` means "free" and is allowed; any other error (missing bucket,
-/// auth, unreachable endpoint) is surfaced here, before any backup work.
+/// Check that object `key` is free: `NotFound` means "free" and is
+/// allowed; any other result (object exists — a same-second re-run that
+/// would otherwise silently overwrite a previous backup, missing bucket,
+/// auth, unreachable endpoint) is the S3 target's outcome.
 pub(crate) fn ensure_object_free(client: &AmazonS3, key: &str) -> Result<()> {
     let location = StorePath::from(key);
     let head = block_on(client.head(&location)).with_context(|| format!("head object {key}"))?;

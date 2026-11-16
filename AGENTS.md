@@ -29,9 +29,12 @@ crate), optionally OpenPGP-encrypted via the system `gpg`.
   `RetentionPeriod`; the sibling `update` subcommand dispatches the
   self-update
 - `src/lib.rs` — `run()`: validate → preflight → db snapshot → archive →
-  encrypt → deliver → (on success only) retention cleanup; `stamp()` mints the
-  second-precision UTC file name; `archive_stamp()`/`should_delete()` are the
-  shared retention predicates
+  encrypt → deliver → per-target retention cleanup (only targets that
+  received the archive are cleaned); every target step — prepare,
+  collision, preflight, delivery — is a per-target outcome, and the run
+  refuses before work only when no target is left to receive the artifact;
+  `stamp()` mints the second-precision UTC file name;
+  `archive_stamp()`/`should_delete()` are the shared retention predicates
 - `src/db.rs` — `Connection::backup` (SQLite Online Backup), read-only open
   with a short busy retry
 - `src/archive.rs` — streams the snapshot + files straight into gzip (no
@@ -41,14 +44,15 @@ crate), optionally OpenPGP-encrypted via the system `gpg`.
 - `src/crypto.rs` — recipient format/keyring preflight (full 40-hex-digit
   fingerprints, primary or subkey) + `gpg --encrypt` with compression off
   (input is already gzip)
-- `src/deliver.rs` — atomic per-target copy; targets are independent but any
-  failure fails the run, naming every failing target; also best-effort local
-  retention cleanup (`cleanup_retention`)
+- `src/deliver.rs` — atomic per-target copy, one outcome per target
+  (`Ok(dest)`/`Err(reason)`); also best-effort per-target local retention
+  cleanup (`cleanup_retention`)
 - `src/s3.rs` — S3-compatible delivery (`object_store` + a shared lazily
   created tokio runtime behind a sync `block_on` wrapper): client build,
-  head-based no-overwrite preflight, streaming multipart upload,
-  `join_prefix` key composition, and best-effort S3 retention cleanup
-  (`cleanup_retention` over `list_with_delimiter` + `delete`)
+  head-based no-overwrite preflight (the S3 target's outcome, not a run
+  gate), streaming multipart upload, `join_prefix` key composition, and
+  best-effort S3 retention cleanup (`cleanup_retention` over
+  `list_with_delimiter` + `delete`)
 - `src/update.rs` — GitHub-release self-update: only the latest stable
   release (a newer prerelease is refused), the compile-time target selects
   the asset, and the API-reported SHA-256 digest is verified before an
@@ -68,8 +72,9 @@ crate), optionally OpenPGP-encrypted via the system `gpg`.
   archive root with no top-level directory — restore is
   `tar -x -C <data dir>`. Don't add a wrapper directory.
 - `--name` is a file-name prefix: no `/` or NUL, ≤ 200 bytes. The suffix is
-  a second-precision UTC stamp, so a same-second re-run aborts on the
-  already-present name instead of overwriting.
+  a second-precision UTC stamp, so a same-second re-run fails the
+  already-occupied targets on their own instead of overwriting (the run
+  refuses only when no target is left to receive the artifact).
 - A file whose size/**mtime** changes while being archived fails the run
   loudly: tar records must match what was streamed, or the whole archive
   tail corrupts. Keep that check if you touch `files::write`.
