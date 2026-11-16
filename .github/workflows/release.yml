@@ -47,9 +47,12 @@ jobs:
       # Draft first (with generated notes) so the parallel upload job below
       # only ever appends assets to an existing release instead of racing to
       # create it (taiki-e's upload action expects the release to exist).
+      # A hyphenated semver tag (v1.2.3-rc.1) is a prerelease, not a stable
+      # release: flag it so /releases/latest never offers it to the updater.
       - uses: softprops/action-gh-release@v3
         with:
           draft: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
           generate_release_notes: true
 
   build-and-upload:
@@ -88,3 +91,4 @@ jobs:
       - uses: softprops/action-gh-release@v3
         with:
           draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
